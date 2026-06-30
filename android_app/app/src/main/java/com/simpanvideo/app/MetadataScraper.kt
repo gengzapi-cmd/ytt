@@ -21,32 +21,58 @@ object MetadataScraper {
 
     fun fetchYoutubeMetadata(urlString: String): ScrapedMetadata? {
         val videoId = getYoutubeVideoId(urlString) ?: return null
-        val embedUrl = "https://www.youtube.com/embed/$videoId"
+        val watchUrl = "https://www.youtube.com/watch?v=$videoId"
         
-        // Coba ambil dari halaman embed karena HTML-nya jauh lebih kecil dan cepat di-load!
-        val html = fetchHtml(embedUrl) ?: fetchHtml(urlString) ?: return null
+        val html = fetchHtml(watchUrl) ?: return null
         
-        // Ekstraksi Judul
-        var title = extractMeta(html, "<meta property=\"og:title\" content=\"([^\"]+)\"")
-            ?: extractMeta(html, "<title>([^<]+)</title>")
-            ?: "Video YouTube"
-        title = title.removeSuffix(" - YouTube").trim()
+        var title = ""
+        var uploader = ""
+        var duration = 0
+        var viewCount = 0L
 
-        // Ekstraksi Uploader/Author
-        val uploader = extractMeta(html, "<link itemprop=\"name\" content=\"([^\"]+)\"")
-            ?: extractMeta(html, "<meta name=\"author\" content=\"([^\"]+)\"")
-            ?: "YouTube Channel"
+        // Primary: Parse using ytInitialPlayerResponse JSON payload
+        val marker = "ytInitialPlayerResponse = "
+        val index = html.indexOf(marker)
+        if (index != -1) {
+            val start = index + marker.length
+            val end = html.indexOf("};", start)
+            if (end != -1) {
+                val jsonStr = html.substring(start, end + 1)
+                val vdetailsIdx = jsonStr.indexOf("\"videoDetails\":")
+                val searchStr = if (vdetailsIdx != -1) jsonStr.substring(vdetailsIdx) else jsonStr
 
-        // Ekstraksi Durasi (ISO 8601 format like PT3M15S)
-        val durationStr = extractMeta(html, "<meta itemprop=\"duration\" content=\"([^\"]+)\"")
-        val duration = if (durationStr != null) parseIsoDuration(durationStr) else 0
+                title = extractJsonString(searchStr, "title") ?: ""
+                uploader = extractJsonString(searchStr, "author") ?: ""
+                duration = extractJsonString(searchStr, "lengthSeconds")?.toIntOrNull() ?: 0
+                viewCount = extractJsonString(searchStr, "viewCount")?.toLongOrNull() ?: 0L
+            }
+        }
 
-        // Thumbnail
+        // Secondary / Fallback: Parse using OpenGraph and meta tags
+        if (title.isEmpty()) {
+            title = extractMeta(html, "<meta property=\"og:title\" content=\"([^\"]+)\"")
+                ?: extractMeta(html, "<title>([^<]+)</title>")
+                ?: "Video YouTube"
+            title = title.removeSuffix(" - YouTube").trim()
+        }
+
+        if (uploader.isEmpty()) {
+            uploader = extractMeta(html, "<link itemprop=\"name\" content=\"([^\"]+)\"")
+                ?: extractMeta(html, "<meta name=\"author\" content=\"([^\"]+)\"")
+                ?: "YouTube Channel"
+        }
+
+        if (duration == 0) {
+            val durationStr = extractMeta(html, "<meta itemprop=\"duration\" content=\"([^\"]+)\"")
+            duration = if (durationStr != null) parseIsoDuration(durationStr) else 0
+        }
+
+        if (viewCount == 0L) {
+            val viewsStr = extractMeta(html, "<meta itemprop=\"interactionCount\" content=\"([^\"]+)\"")
+            viewCount = viewsStr?.toLongOrNull() ?: 0L
+        }
+
         val thumbnail = "https://i.ytimg.com/vi/$videoId/hqdefault.jpg"
-
-        // Views
-        val viewsStr = extractMeta(html, "<meta itemprop=\"interactionCount\" content=\"([^\"]+)\"")
-        val viewCount = viewsStr?.toLongOrNull() ?: 0L
 
         return ScrapedMetadata(
             title = title,
@@ -92,6 +118,9 @@ object MetadataScraper {
             connection = url.openConnection() as HttpURLConnection
             connection.requestMethod = "GET"
             connection.setRequestProperty("User-Agent", USER_AGENT)
+            if (urlString.contains("youtube.com") || urlString.contains("youtu.be")) {
+                connection.setRequestProperty("Referer", "https://www.youtube.com")
+            }
             connection.connectTimeout = 5000
             connection.readTimeout = 5000
             
@@ -101,11 +130,22 @@ object MetadataScraper {
                 val response = StringBuilder()
                 var line: String?
                 var linesRead = 0
-                // Kita batasi pembacaan agar sangat cepat
                 while (reader.readLine().also { line = it } != null) {
                     response.append(line).append("\n")
                     linesRead++
-                    if (linesRead > 500 || response.contains("</head>")) {
+                    
+                    val hasYtResponse = response.contains("ytInitialPlayerResponse = ") && response.contains("};")
+                    if (hasYtResponse) {
+                        break
+                    }
+                    
+                    if (!urlString.contains("youtube.com") && !urlString.contains("youtu.be")) {
+                        if (response.contains("</head>") || linesRead > 500) {
+                            break
+                        }
+                    }
+                    
+                    if (linesRead > 3000) {
                         break
                     }
                 }
@@ -120,6 +160,65 @@ object MetadataScraper {
         } finally {
             connection?.disconnect()
         }
+    }
+
+    private fun extractJsonString(jsonStr: String, key: String): String? {
+        try {
+            val pattern = Pattern.compile("\"$key\"\\s*:\\s*\"?((?:[^\"\\\\]|\\\\.)*)\"?", Pattern.CASE_INSENSITIVE)
+            val matcher = pattern.matcher(jsonStr)
+            if (matcher.find()) {
+                val value = matcher.group(1) ?: return null
+                return unescapeJson(value)
+            }
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+        return null
+    }
+
+    private fun unescapeJson(input: String): String {
+        val sb = StringBuilder()
+        var i = 0
+        while (i < input.length) {
+            val c = input[i]
+            if (c == '\\' && i + 1 < input.length) {
+                val next = input[i + 1]
+                when (next) {
+                    '"' -> { sb.append('"'); i += 2 }
+                    '\\' -> { sb.append('\\'); i += 2 }
+                    '/' -> { sb.append('/'); i += 2 }
+                    'b' -> { sb.append('\b'); i += 2 }
+                    'f' -> { sb.append('\f'); i += 2 }
+                    'n' -> { sb.append('\n'); i += 2 }
+                    'r' -> { sb.append('\r'); i += 2 }
+                    't' -> { sb.append('\t'); i += 2 }
+                    'u' -> {
+                        if (i + 5 < input.length) {
+                            try {
+                                val hex = input.substring(i + 2, i + 6)
+                                val code = hex.toInt(16)
+                                sb.append(code.toChar())
+                                i += 6
+                            } catch (e: Exception) {
+                                sb.append("\\u")
+                                i += 2
+                            }
+                        } else {
+                            sb.append("\\u")
+                            i += 2
+                        }
+                    }
+                    else -> {
+                        sb.append(c)
+                        i++
+                    }
+                }
+            } else {
+                sb.append(c)
+                i++
+            }
+        }
+        return sb.toString()
     }
 
     private fun extractMeta(html: String, patternString: String): String? {
