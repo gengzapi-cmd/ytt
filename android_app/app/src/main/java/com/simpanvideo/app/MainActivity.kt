@@ -226,6 +226,9 @@ fun startDownload(context: Context, videoUrl: String, formatId: String, title: S
             
             // Tanpa subfolder, langsung ke folder Downloads
             request.addOption("-o", "${downloadDir.absolutePath}/$uniqueTitleBase.%(ext)s")
+            request.addOption("-4") // Paksa IPv4 untuk menghindari delay DNS IPv6 pada Android
+            request.addOption("--no-check-formats") // Jangan cek URL format via HTTP HEAD
+            request.addOption("--cache-dir", "${context.cacheDir.absolutePath}/yt-dlp-cache") // Aktifkan caching player JS
 
             var lastProgress = -1
             var isAudioPhase = isAudio
@@ -302,6 +305,7 @@ fun formatNumber(number: Long): String {
 
 @Composable
 fun HomeScreen() {
+    val context = LocalContext.current
     var urlInput by remember { mutableStateOf("") }
     var isLoading by remember { mutableStateOf(false) }
     var mediaInfo by remember { mutableStateOf<VideoInfo?>(null) }
@@ -331,6 +335,9 @@ fun HomeScreen() {
                     req.addOption("--flat-playlist") // Cegah load detail item playlist
                     req.addOption("--skip-download")
                     req.addOption("--quiet")
+                    req.addOption("-4") // Paksa IPv4 untuk menghindari delay DNS IPv6 pada Android
+                    req.addOption("--no-check-formats") // Jangan cek URL format via HTTP HEAD
+                    req.addOption("--cache-dir", "${context.cacheDir.absolutePath}/yt-dlp-cache") // Aktifkan caching player JS
                     YoutubeDL.getInstance().getInfo(req)
                 }
                 mediaInfo = info
