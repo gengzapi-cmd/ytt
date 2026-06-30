@@ -188,7 +188,7 @@ object MetadataScraper {
                     '\\' -> { sb.append('\\'); i += 2 }
                     '/' -> { sb.append('/'); i += 2 }
                     'b' -> { sb.append('\b'); i += 2 }
-                    'f' -> { sb.append('\f'); i += 2 }
+                    'f' -> { sb.append('\u000c'); i += 2 }
                     'n' -> { sb.append('\n'); i += 2 }
                     'r' -> { sb.append('\r'); i += 2 }
                     't' -> { sb.append('\t'); i += 2 }
