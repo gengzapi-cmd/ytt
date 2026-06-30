@@ -335,6 +335,25 @@ fun mapToVideoInfo(scraped: ScrapedMetadata): VideoInfo {
     return info
 }
 
+fun parseQualitiesString(str: String): Map<String, Long> {
+    if (str.isEmpty()) return emptyMap()
+    val map = mutableMapOf<String, Long>()
+    try {
+        val parts = str.split(",")
+        for (part in parts) {
+            val subparts = part.split(":")
+            if (subparts.size == 2) {
+                val quality = subparts[0]
+                val size = subparts[1].toLongOrNull() ?: 0L
+                map[quality] = size
+            }
+        }
+    } catch (e: Exception) {
+        e.printStackTrace()
+    }
+    return map
+}
+
 @Composable
 fun HomeScreen() {
     val context = LocalContext.current
@@ -343,6 +362,7 @@ fun HomeScreen() {
     var mediaInfo by remember { mutableStateOf<VideoInfo?>(null) }
     var openOptions by remember { mutableStateOf(false) }
     var errorMessage by remember { mutableStateOf<String?>(null) }
+    var parsedQualities by remember { mutableStateOf<Map<String, Long>>(emptyMap()) }
     
     val coroutineScope = rememberCoroutineScope()
     val clipboardManager = LocalClipboardManager.current
@@ -352,9 +372,11 @@ fun HomeScreen() {
         isLoading = true
         errorMessage = null
         mediaInfo = null
+        parsedQualities = emptyMap()
         
         coroutineScope.launch {
             try {
+                var tempQualities = emptyMap<String, Long>()
                 val info = withContext(Dispatchers.IO) {
                     val isYoutube = urlInput.contains("youtube.com", ignoreCase = true) || urlInput.contains("youtu.be", ignoreCase = true)
                     val isTikTok = urlInput.contains("tiktok.com", ignoreCase = true)
@@ -365,6 +387,7 @@ fun HomeScreen() {
                         try {
                             val scraped = MetadataScraper.fetchYoutubeMetadata(urlInput)
                             if (scraped != null) {
+                                tempQualities = parseQualitiesString(scraped.qualities)
                                 result = mapToVideoInfo(scraped)
                             }
                         } catch (e: Exception) {
@@ -401,6 +424,7 @@ fun HomeScreen() {
                     
                     result!!
                 }
+                parsedQualities = tempQualities
                 mediaInfo = info
             } catch (e: Exception) {
                 e.printStackTrace()
@@ -572,28 +596,64 @@ fun HomeScreen() {
                             Column(modifier = Modifier.padding(top = 8.dp)) {
                                 val context = LocalContext.current
                                 
-                                data class DlOption(val label: String, val desc: String, val kind: String, val formatId: String)
+                                data class DlOption(val label: String, val desc: String, val kind: String, val formatId: String, val height: Int = 0)
                                 
                                 val downloadOptions = listOf(
-                                    DlOption("Kualitas Terbaik", "Paling Jernih", "video", "bestvideo+bestaudio/best"),
-                                    DlOption("2160p (4K)", "Ultra HD", "video", "bestvideo[height<=2160]+bestaudio/best"),
-                                    DlOption("1440p (2K)", "Quad HD", "video", "bestvideo[height<=1440]+bestaudio/best"),
-                                    DlOption("1080p", "Full HD", "video", "bestvideo[height<=1080]+bestaudio/best"),
-                                    DlOption("720p", "High Definition", "video", "bestvideo[height<=720]+bestaudio/best"),
-                                    DlOption("480p", "Standard", "video", "bestvideo[height<=480]+bestaudio/best"),
-                                    DlOption("360p", "Low", "video", "bestvideo[height<=360]+bestaudio/best"),
-                                    DlOption("240p", "Sangat Rendah", "video", "bestvideo[height<=240]+bestaudio/best"),
-                                    DlOption("Kualitas Terburuk", "Paling Hemat Kuota", "video", "worstvideo+worstaudio/worst"),
-                                    DlOption("Audio Terbaik", "Kualitas Tertinggi", "audio", "bestaudio/best"),
-                                    DlOption("Audio 192kbps", "MP3/M4A", "audio", "bestaudio[abr<=192]/bestaudio"),
-                                    DlOption("Audio 160kbps", "MP3/M4A", "audio", "bestaudio[abr<=160]/bestaudio"),
-                                    DlOption("Audio 128kbps", "MP3/M4A", "audio", "bestaudio[abr<=128]/bestaudio"),
-                                    DlOption("Audio 96kbps", "MP3/M4A", "audio", "bestaudio[abr<=96]/bestaudio"),
-                                    DlOption("Audio 64kbps", "MP3/M4A", "audio", "bestaudio[abr<=64]/bestaudio"),
-                                    DlOption("Audio Terburuk", "Paling Hemat Kuota", "audio", "worstaudio/worst")
+                                    DlOption("Kualitas Terbaik", "Paling Jernih", "video", "bestvideo+bestaudio/best", 9999),
+                                    DlOption("2160p (4K)", "Ultra HD", "video", "bestvideo[height<=2160]+bestaudio/best", 2160),
+                                    DlOption("1440p (2K)", "Quad HD", "video", "bestvideo[height<=1440]+bestaudio/best", 1440),
+                                    DlOption("1080p", "Full HD", "video", "bestvideo[height<=1080]+bestaudio/best", 1080),
+                                    DlOption("720p", "High Definition", "video", "bestvideo[height<=720]+bestaudio/best", 720),
+                                    DlOption("480p", "Standard", "video", "bestvideo[height<=480]+bestaudio/best", 480),
+                                    DlOption("360p", "Low", "video", "bestvideo[height<=360]+bestaudio/best", 360),
+                                    DlOption("240p", "Sangat Rendah", "video", "bestvideo[height<=240]+bestaudio/best", 240),
+                                    DlOption("Kualitas Terburuk", "Paling Hemat Kuota", "video", "worstvideo+worstaudio/worst", 0),
+                                    DlOption("Audio Terbaik", "Kualitas Tertinggi", "audio", "bestaudio/best", 0),
+                                    DlOption("Audio 192kbps", "MP3/M4A", "audio", "bestaudio[abr<=192]/bestaudio", 0),
+                                    DlOption("Audio 160kbps", "MP3/M4A", "audio", "bestaudio[abr<=160]/bestaudio", 0),
+                                    DlOption("Audio 128kbps", "MP3/M4A", "audio", "bestaudio[abr<=128]/bestaudio", 0),
+                                    DlOption("Audio 96kbps", "MP3/M4A", "audio", "bestaudio[abr<=96]/bestaudio", 0),
+                                    DlOption("Audio 64kbps", "MP3/M4A", "audio", "bestaudio[abr<=64]/bestaudio", 0),
+                                    DlOption("Audio Terburuk", "Paling Hemat Kuota", "audio", "worstaudio/worst", 0)
                                 )
 
-                                downloadOptions.forEachIndexed { index, option ->
+                                val maxHeight = parsedQualities.keys
+                                    .mapNotNull { it.replace("p", "").toIntOrNull() }
+                                    .maxOrNull() ?: 0
+
+                                val filteredOptions = if (maxHeight > 0) {
+                                    downloadOptions.filter { option ->
+                                        option.kind == "audio" || option.height == 0 || option.height == 9999 || option.height <= maxHeight
+                                    }
+                                } else {
+                                    downloadOptions
+                                }
+
+                                val finalOptions = filteredOptions.map { option ->
+                                    val sizeBytes = when {
+                                        option.kind == "video" -> {
+                                            val h = if (option.height == 9999) maxHeight else if (option.height == 0) {
+                                                parsedQualities.keys.mapNotNull { it.replace("p", "").toIntOrNull() }.minOrNull() ?: 0
+                                            } else option.height
+                                            val vSize = parsedQualities["${h}p"] ?: 0L
+                                            val aSize = parsedQualities["audio"] ?: 0L
+                                            if (vSize > 0L) vSize + aSize else 0L
+                                        }
+                                        option.label == "Audio Terbaik" -> {
+                                            parsedQualities["audio"] ?: 0L
+                                        }
+                                        else -> 0L
+                                    }
+                                    
+                                    if (sizeBytes > 0L) {
+                                        val sizeMb = String.format("%.1f MB", sizeBytes / (1024.0 * 1024.0))
+                                        option.copy(desc = "${option.desc} · $sizeMb")
+                                    } else {
+                                        option
+                                    }
+                                }
+
+                                finalOptions.forEachIndexed { index, option ->
                                     Row(modifier = Modifier.fillMaxWidth().padding(top = 8.dp).clip(RoundedCornerShape(20.dp)).background(Color(0x80161B22)).border(1.dp, BorderColor, RoundedCornerShape(20.dp)).clickable { }.padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
                                         Box(modifier = Modifier.size(36.dp).clip(CircleShape).background(if (option.kind == "audio") Color(0x33A020F0) else Color(0x2200E5FF)), contentAlignment = Alignment.Center) {
                                             Icon(painterResource(if (option.kind == "audio") R.drawable.ic_audio else R.drawable.ic_video), contentDescription = null, tint = CyanWarm, modifier = Modifier.size(16.dp))

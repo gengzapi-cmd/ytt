@@ -13,7 +13,8 @@ data class ScrapedMetadata(
     val duration: Int, // detik
     val viewCount: Long,
     val likeCount: Long,
-    val extractor: String
+    val extractor: String,
+    val qualities: String = ""
 )
 
 object MetadataScraper {
@@ -29,6 +30,8 @@ object MetadataScraper {
         var uploader = ""
         var duration = 0
         var viewCount = 0L
+        var likeCount = 0L
+        var qualities = ""
 
         // Primary: Parse using ytInitialPlayerResponse JSON payload
         val marker = "ytInitialPlayerResponse = "
@@ -45,6 +48,8 @@ object MetadataScraper {
                 uploader = extractJsonString(searchStr, "author") ?: ""
                 duration = extractJsonString(searchStr, "lengthSeconds")?.toIntOrNull() ?: 0
                 viewCount = extractJsonString(searchStr, "viewCount")?.toLongOrNull() ?: 0L
+                likeCount = extractJsonString(jsonStr, "likeCount")?.toLongOrNull() ?: 0L
+                qualities = parseQualities(jsonStr)
             }
         }
 
@@ -80,8 +85,9 @@ object MetadataScraper {
             thumbnail = thumbnail,
             duration = duration,
             viewCount = viewCount,
-            likeCount = 0L,
-            extractor = "youtube"
+            likeCount = likeCount,
+            extractor = "youtube",
+            qualities = qualities
         )
     }
 
@@ -263,6 +269,41 @@ object MetadataScraper {
             }
         }
         return null
+    }
+
+    private fun parseQualities(jsonStr: String): String {
+        try {
+            val afIdx = jsonStr.indexOf("\"adaptiveFormats\":[")
+            if (afIdx == -1) return ""
+            val start = afIdx + "\"adaptiveFormats\":[".length
+            val end = jsonStr.indexOf("]", start)
+            if (end == -1) return ""
+            val afStr = jsonStr.substring(start, end)
+            val blocks = afStr.split("},{")
+            val map = mutableMapOf<String, Long>()
+            for (block in blocks) {
+                val ql = extractJsonString(block, "qualityLabel")
+                val cl = extractJsonString(block, "contentLength")?.toLongOrNull()
+                val mime = extractJsonString(block, "mimeType") ?: ""
+                
+                if (ql != null && cl != null) {
+                    val existing = map[ql]
+                    if (existing == null || mime.contains("video/mp4")) {
+                        map[ql] = cl
+                    }
+                } else if (cl != null && mime.contains("audio/")) {
+                    // Save best audio size under "audio" key
+                    val existingAudio = map["audio"]
+                    if (existingAudio == null || cl > existingAudio) {
+                        map["audio"] = cl
+                    }
+                }
+            }
+            return map.entries.joinToString(",") { "${it.key}:${it.value}" }
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+        return ""
     }
 
     private fun parseIsoDuration(durationStr: String): Int {
