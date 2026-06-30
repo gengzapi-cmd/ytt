@@ -373,6 +373,7 @@ fun HomeScreen() {
         errorMessage = null
         mediaInfo = null
         parsedQualities = emptyMap()
+        openOptions = false
         
         coroutineScope.launch {
             try {
@@ -485,9 +486,11 @@ fun HomeScreen() {
                         modifier = Modifier.weight(1f),
                         textStyle = TextStyle(color = Color.White, fontSize = 14.sp, fontFamily = PoppinsFont),
                         cursorBrush = SolidColor(CyanWarm),
+                        singleLine = true,
+                        maxLines = 1,
                         decorationBox = { innerTextField ->
                             if (urlInput.isEmpty()) {
-                                Text("Tempel link video di sini…", color = TextMuted, fontSize = 14.sp)
+                                Text("Tempel link video di sini…", color = TextMuted, fontSize = 14.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
                             }
                             innerTextField()
                         }
@@ -599,7 +602,6 @@ fun HomeScreen() {
                                 data class DlOption(val label: String, val desc: String, val kind: String, val formatId: String, val height: Int = 0)
                                 
                                 val downloadOptions = listOf(
-                                    DlOption("Kualitas Terbaik", "Paling Jernih", "video", "bestvideo+bestaudio/best", 9999),
                                     DlOption("2160p (4K)", "Ultra HD", "video", "bestvideo[height<=2160]+bestaudio/best", 2160),
                                     DlOption("1440p (2K)", "Quad HD", "video", "bestvideo[height<=1440]+bestaudio/best", 1440),
                                     DlOption("1080p", "Full HD", "video", "bestvideo[height<=1080]+bestaudio/best", 1080),
@@ -607,25 +609,12 @@ fun HomeScreen() {
                                     DlOption("480p", "Standard", "video", "bestvideo[height<=480]+bestaudio/best", 480),
                                     DlOption("360p", "Low", "video", "bestvideo[height<=360]+bestaudio/best", 360),
                                     DlOption("240p", "Sangat Rendah", "video", "bestvideo[height<=240]+bestaudio/best", 240),
-                                    DlOption("Kualitas Terburuk", "Paling Hemat Kuota", "video", "worstvideo+worstaudio/worst", 0),
-                                    DlOption("Audio Terbaik", "Kualitas Tertinggi", "audio", "bestaudio/best", 0),
-                                    DlOption("Audio 192kbps", "MP3/M4A", "audio", "bestaudio[abr<=192]/bestaudio", 0),
-                                    DlOption("Audio 160kbps", "MP3/M4A", "audio", "bestaudio[abr<=160]/bestaudio", 0),
-                                    DlOption("Audio 128kbps", "MP3/M4A", "audio", "bestaudio[abr<=128]/bestaudio", 0),
-                                    DlOption("Audio 96kbps", "MP3/M4A", "audio", "bestaudio[abr<=96]/bestaudio", 0),
-                                    DlOption("Audio 64kbps", "MP3/M4A", "audio", "bestaudio[abr<=64]/bestaudio", 0),
-                                    DlOption("Audio Terburuk", "Paling Hemat Kuota", "audio", "worstaudio/worst", 0)
+                                    DlOption("Audio Terbaik", "Kualitas Tertinggi", "audio", "bestaudio/best", 0)
                                 )
-
-                                val maxHeight = parsedQualities.keys
-                                    .mapNotNull { it.replace("p", "").toIntOrNull() }
-                                    .maxOrNull() ?: 0
 
                                 val filteredOptions = if (parsedQualities.isNotEmpty()) {
                                     downloadOptions.filter { option ->
                                         option.kind == "audio" ||
-                                        option.height == 0 ||
-                                        option.height == 9999 ||
                                         parsedQualities.containsKey("${option.height}p")
                                     }
                                 } else {
@@ -635,10 +624,7 @@ fun HomeScreen() {
                                 val finalOptions = filteredOptions.map { option ->
                                     val sizeBytes = when {
                                         option.kind == "video" -> {
-                                            val h = if (option.height == 9999) maxHeight else if (option.height == 0) {
-                                                parsedQualities.keys.mapNotNull { it.replace("p", "").toIntOrNull() }.minOrNull() ?: 0
-                                            } else option.height
-                                            val vSize = parsedQualities["${h}p"] ?: 0L
+                                            val vSize = parsedQualities["${option.height}p"] ?: 0L
                                             val aSize = parsedQualities["audio"] ?: 0L
                                             if (vSize > 0L) vSize + aSize else 0L
                                         }
