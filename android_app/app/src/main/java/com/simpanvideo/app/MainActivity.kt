@@ -621,9 +621,12 @@ fun HomeScreen() {
                                     .mapNotNull { it.replace("p", "").toIntOrNull() }
                                     .maxOrNull() ?: 0
 
-                                val filteredOptions = if (maxHeight > 0) {
+                                val filteredOptions = if (parsedQualities.isNotEmpty()) {
                                     downloadOptions.filter { option ->
-                                        option.kind == "audio" || option.height == 0 || option.height == 9999 || option.height <= maxHeight
+                                        option.kind == "audio" ||
+                                        option.height == 0 ||
+                                        option.height == 9999 ||
+                                        parsedQualities.containsKey("${option.height}p")
                                     }
                                 } else {
                                     downloadOptions

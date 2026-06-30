@@ -279,12 +279,34 @@ object MetadataScraper {
             val end = jsonStr.indexOf("]", start)
             if (end == -1) return ""
             val afStr = jsonStr.substring(start, end)
-            val blocks = afStr.split("},{")
+            
+            val blocks = afStr.split("\"itag\":")
             val map = mutableMapOf<String, Long>()
-            for (block in blocks) {
-                val ql = extractJsonString(block, "qualityLabel")
-                val cl = extractJsonString(block, "contentLength")?.toLongOrNull()
-                val mime = extractJsonString(block, "mimeType") ?: ""
+            
+            val qlPattern = Pattern.compile("\"qualityLabel\"\\s*:\\s*\"([^\"]+)\"", Pattern.CASE_INSENSITIVE)
+            val clPattern = Pattern.compile("\"contentLength\"\\s*:\\s*\"?(\\d+)\"?", Pattern.CASE_INSENSITIVE)
+            val mimePattern = Pattern.compile("\"mimeType\"\\s*:\\s*\"([^\"]+)\"", Pattern.CASE_INSENSITIVE)
+            
+            for (i in 1 until blocks.size) {
+                val block = blocks[i]
+                
+                val qlMatcher = qlPattern.matcher(block)
+                val clMatcher = clPattern.matcher(block)
+                val mimeMatcher = mimePattern.matcher(block)
+                
+                var ql: String? = null
+                var cl: Long? = null
+                var mime = ""
+                
+                if (qlMatcher.find()) {
+                    ql = qlMatcher.group(1)
+                }
+                if (clMatcher.find()) {
+                    cl = clMatcher.group(1)?.toLongOrNull()
+                }
+                if (mimeMatcher.find()) {
+                    mime = mimeMatcher.group(1) ?: ""
+                }
                 
                 if (ql != null && cl != null) {
                     val existing = map[ql]
@@ -292,7 +314,6 @@ object MetadataScraper {
                         map[ql] = cl
                     }
                 } else if (cl != null && mime.contains("audio/")) {
-                    // Save best audio size under "audio" key
                     val existingAudio = map["audio"]
                     if (existingAudio == null || cl > existingAudio) {
                         map["audio"] = cl
