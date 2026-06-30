@@ -181,8 +181,26 @@ fun App() {
     }
 }
 
+fun getUniqueTitle(downloadDir: File, safeTitle: String): String {
+    var candidate = safeTitle
+    var counter = 1
+    val files = downloadDir.listFiles() ?: emptyArray()
+    while (files.any { file -> 
+        file.nameWithoutExtension.equals(candidate, ignoreCase = true)
+    }) {
+        candidate = "$safeTitle ($counter)"
+        counter++
+    }
+    return candidate
+}
+
 fun startDownload(context: Context, videoUrl: String, formatId: String, title: String, isAudio: Boolean = false) {
-    Toast.makeText(context, "Memulai unduhan: $title", Toast.LENGTH_SHORT).show()
+    val downloadDir = android.os.Environment.getExternalStoragePublicDirectory(android.os.Environment.DIRECTORY_DOWNLOADS)
+    val safeTitle = title.replace(Regex("[\\\\/:*?\"<>|]"), "_")
+    val uniqueTitleBase = getUniqueTitle(downloadDir, safeTitle)
+    val displayTitle = uniqueTitleBase.replace("_", " ")
+
+    Toast.makeText(context, "Memulai unduhan: $displayTitle", Toast.LENGTH_SHORT).show()
     CoroutineScope(Dispatchers.IO).launch {
         val notificationManager = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
         val channelId = "simpanvideo_downloads"
@@ -190,10 +208,10 @@ fun startDownload(context: Context, videoUrl: String, formatId: String, title: S
             val channel = NotificationChannel(channelId, "Unduhan", NotificationManager.IMPORTANCE_LOW)
             notificationManager.createNotificationChannel(channel)
         }
-        val notificationId = title.hashCode()
+        val notificationId = uniqueTitleBase.hashCode()
         val builder = NotificationCompat.Builder(context, channelId)
             .setSmallIcon(android.R.drawable.stat_sys_download)
-            .setContentTitle(title)
+            .setContentTitle(displayTitle)
             .setContentText("Menyiapkan unduhan...")
             .setPriority(NotificationCompat.PRIORITY_LOW)
             .setOngoing(true)
@@ -206,16 +224,17 @@ fun startDownload(context: Context, videoUrl: String, formatId: String, title: S
             // formatId sudah mencakup string lengkap (tidak butuh if-else isAudio)
             request.addOption("-f", formatId)
             
-            val downloadDir = android.os.Environment.getExternalStoragePublicDirectory(android.os.Environment.DIRECTORY_DOWNLOADS)
             // Tanpa subfolder, langsung ke folder Downloads
-
-            
-            val safeTitle = title.replace(Regex("[\\\\/:*?\"<>|]"), "_")
-            request.addOption("-o", "${downloadDir.absolutePath}/$safeTitle.%(ext)s")
+            request.addOption("-o", "${downloadDir.absolutePath}/$uniqueTitleBase.%(ext)s")
 
             var lastProgress = -1
+            var isAudioPhase = isAudio
             com.yausername.youtubedl_android.YoutubeDL.getInstance().execute(request, "task_${System.currentTimeMillis()}") { progress, _, line ->
                 val currentProgress = progress.toInt()
+                if (!isAudioPhase && currentProgress < lastProgress && lastProgress > 80) {
+                    isAudioPhase = true
+                }
+
                 if (currentProgress != lastProgress && currentProgress >= 0) {
                     lastProgress = currentProgress
 
@@ -227,10 +246,20 @@ fun startDownload(context: Context, videoUrl: String, formatId: String, title: S
                     val etaMatch = etaRegex.find(line ?: "")
                     val eta = etaMatch?.groupValues?.get(1) ?: ""
 
+                    val isMerging = line?.contains("merger", ignoreCase = true) == true || 
+                                    line?.contains("merging", ignoreCase = true) == true
+
+                    val phasePrefix = when {
+                        isMerging -> "Menggabungkan Video & Audio..."
+                        isAudioPhase -> "Mengunduh Audio..."
+                        else -> "Mengunduh Video..."
+                    }
+
                     val contentText = when {
-                        speed.isNotEmpty() && eta.isNotEmpty() -> "Mengunduh... $currentProgress% ($speed) · ETA $eta"
-                        speed.isNotEmpty() -> "Mengunduh... $currentProgress% ($speed)"
-                        else -> "Mengunduh... $currentProgress%"
+                        isMerging -> "Menggabungkan Video & Audio..."
+                        speed.isNotEmpty() && eta.isNotEmpty() -> "$phasePrefix $currentProgress% ($speed) · ETA $eta"
+                        speed.isNotEmpty() -> "$phasePrefix $currentProgress% ($speed)"
+                        else -> "$phasePrefix $currentProgress%"
                     }
 
                     builder.setProgress(100, currentProgress, false)
@@ -244,7 +273,7 @@ fun startDownload(context: Context, videoUrl: String, formatId: String, title: S
                 .setOngoing(false)
                 .setSmallIcon(android.R.drawable.stat_sys_download_done)
             notificationManager.notify(notificationId, builder.build())
-            withContext(Dispatchers.Main) { Toast.makeText(context, "Selesai mengunduh $title", Toast.LENGTH_LONG).show() }
+            withContext(Dispatchers.Main) { Toast.makeText(context, "Selesai mengunduh $displayTitle", Toast.LENGTH_LONG).show() }
         } catch (e: Exception) {
             e.printStackTrace()
             builder.setContentText("Gagal: ${e.message}")
