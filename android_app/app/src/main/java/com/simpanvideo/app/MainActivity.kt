@@ -303,6 +303,38 @@ fun formatNumber(number: Long): String {
     }
 }
 
+fun mapToVideoInfo(scraped: ScrapedMetadata): VideoInfo {
+    val info = VideoInfo()
+    fun setPrivateField(obj: Any, fieldName: String, value: Any?) {
+        try {
+            val field = obj.javaClass.getDeclaredField(fieldName)
+            field.isAccessible = true
+            val fieldType = field.type
+            when {
+                fieldType == String::class.java -> field.set(obj, value?.toString())
+                fieldType == Int::class.java || fieldType == java.lang.Integer::class.java -> {
+                    field.set(obj, value?.toString()?.toIntOrNull() ?: 0)
+                }
+                fieldType == Long::class.java || fieldType == java.lang.Long::class.java -> {
+                    field.set(obj, value?.toString()?.toLongOrNull() ?: 0L)
+                }
+                else -> field.set(obj, value)
+            }
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+    }
+    
+    setPrivateField(info, "title", scraped.title)
+    setPrivateField(info, "uploader", scraped.uploader)
+    setPrivateField(info, "thumbnail", scraped.thumbnail)
+    setPrivateField(info, "duration", scraped.duration)
+    setPrivateField(info, "viewCount", scraped.viewCount)
+    setPrivateField(info, "likeCount", scraped.likeCount)
+    setPrivateField(info, "extractor", scraped.extractor)
+    return info
+}
+
 @Composable
 fun HomeScreen() {
     val context = LocalContext.current
@@ -324,21 +356,50 @@ fun HomeScreen() {
         coroutineScope.launch {
             try {
                 val info = withContext(Dispatchers.IO) {
-                    val req = YoutubeDLRequest(urlInput)
-                    req.addOption("--no-playlist")
-                    req.addOption("--no-warnings")
-                    req.addOption("--compat-options", "no-youtube-unavailable-videos")
-                    req.addOption("-R", "1") // Retries = 1
-                    req.addOption("--socket-timeout", "5") // Timeout 5 detik
-                    req.addOption("--no-check-certificate") // Lewati validasi SSL
-                    req.addOption("--no-check-certificates")
-                    req.addOption("--flat-playlist") // Cegah load detail item playlist
-                    req.addOption("--skip-download")
-                    req.addOption("--quiet")
-                    req.addOption("-4") // Paksa IPv4 untuk menghindari delay DNS IPv6 pada Android
-                    req.addOption("--no-check-formats") // Jangan cek URL format via HTTP HEAD
-                    req.addOption("--cache-dir", "${context.cacheDir.absolutePath}/yt-dlp-cache") // Aktifkan caching player JS
-                    YoutubeDL.getInstance().getInfo(req)
+                    val isYoutube = urlInput.contains("youtube.com", ignoreCase = true) || urlInput.contains("youtu.be", ignoreCase = true)
+                    val isTikTok = urlInput.contains("tiktok.com", ignoreCase = true)
+                    
+                    var result: VideoInfo? = null
+                    
+                    if (isYoutube) {
+                        try {
+                            val scraped = MetadataScraper.fetchYoutubeMetadata(urlInput)
+                            if (scraped != null) {
+                                result = mapToVideoInfo(scraped)
+                            }
+                        } catch (e: Exception) {
+                            e.printStackTrace()
+                        }
+                    } else if (isTikTok) {
+                        try {
+                            val scraped = MetadataScraper.fetchTikTokMetadata(urlInput)
+                            if (scraped != null) {
+                                result = mapToVideoInfo(scraped)
+                            }
+                        } catch (e: Exception) {
+                            e.printStackTrace()
+                        }
+                    }
+                    
+                    if (result == null) {
+                        val req = YoutubeDLRequest(urlInput)
+                        req.addOption("--no-playlist")
+                        req.addOption("--no-warnings")
+                        req.addOption("--compat-options", "no-youtube-unavailable-videos")
+                        req.addOption("-R", "1") // Retries = 1
+                        req.addOption("--socket-timeout", "5") // Timeout 5 detik
+                        req.addOption("--no-check-certificate") // Lewati validasi SSL
+                        req.addOption("--no-check-certificates")
+                        req.addOption("--flat-playlist") // Cegah load detail item playlist
+                        req.addOption("--skip-download")
+                        req.addOption("--quiet")
+                        req.addOption("-4") // Paksa IPv4 untuk menghindari delay DNS IPv6 pada Android
+                        req.addOption("--no-check-formats") // Jangan cek URL format via HTTP HEAD
+                        req.addOption("--cache-dir", "${context.cacheDir.absolutePath}/yt-dlp-cache") // Aktifkan caching player JS
+                        result = YoutubeDL.getInstance().getInfo(req)
+                    }
+                    
+                    result!!
                 }
                 mediaInfo = info
             } catch (e: Exception) {
