@@ -67,6 +67,13 @@ import java.net.URL
 import java.io.FileOutputStream
 import android.content.Intent
 import android.net.Uri
+import android.app.PendingIntent
+import android.widget.RemoteViews
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
+import androidx.compose.ui.graphics.Shadow
+import org.json.JSONObject
+import org.json.JSONArray
 
 val BgColor = Color(0xFF0D1117)
 val SurfaceColor = Color(0xFF161B22)
@@ -91,6 +98,8 @@ fun Modifier.glow(color: Color = CyanWarm, alpha: Float = 0.2f, radius: Float = 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        CompletedDownloadDatabase.init(this)
+        handleIntent(intent)
         if (Build.VERSION.SDK_INT >= 33) {
             if (ContextCompat.checkSelfPermission(this, android.Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
                 ActivityCompat.requestPermissions(this, arrayOf(android.Manifest.permission.POST_NOTIFICATIONS), 101)
@@ -161,17 +170,131 @@ class MainActivity : ComponentActivity() {
             }
         }
     }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        handleIntent(intent)
+    }
+
+    private fun handleIntent(intent: Intent?) {
+        if (intent != null && intent.getStringExtra("action") == "open_downloads") {
+            NavigationState.currentTab = Tab.DOWNLOADS
+        }
+    }
+}
+
+object NavigationState {
+    var currentTab by mutableStateOf(Tab.HOME)
+}
+
+data class ActiveDownload(
+    val id: String,
+    val title: String,
+    val progress: Int,
+    val speed: String,
+    val eta: String,
+    val typeLabel: String,
+    val isPaused: Boolean = false
+)
+
+object DownloadTracker {
+    val activeDownloads = mutableStateListOf<ActiveDownload>()
+}
+
+data class CompletedDownload(
+    val id: String,
+    val title: String,
+    val platform: String,
+    val uploader: String,
+    val fileSize: String,
+    val duration: String,
+    val localThumbnailPath: String,
+    val localFilePath: String,
+    val timestamp: Long
+)
+
+object CompletedDownloadDatabase {
+    private const val FILE_NAME = "completed_downloads_v2.json"
+    val completedList = mutableStateListOf<CompletedDownload>()
+
+    fun init(context: Context) {
+        completedList.clear()
+        completedList.addAll(loadFromStorage(context))
+    }
+
+    fun add(context: Context, download: CompletedDownload) {
+        completedList.removeIf { it.id == download.id }
+        completedList.add(0, download)
+        saveToStorage(context, completedList)
+    }
+
+    fun remove(context: Context, id: String) {
+        completedList.removeIf { it.id == id }
+        saveToStorage(context, completedList)
+    }
+
+    private fun loadFromStorage(context: Context): List<CompletedDownload> {
+        val file = File(context.filesDir, FILE_NAME)
+        if (!file.exists()) return emptyList()
+        return try {
+            val jsonStr = file.readText()
+            val arr = JSONArray(jsonStr)
+            val list = mutableListOf<CompletedDownload>()
+            for (i in 0 until arr.length()) {
+                val obj = arr.getJSONObject(i)
+                list.add(
+                    CompletedDownload(
+                        id = obj.getString("id"),
+                        title = obj.getString("title"),
+                        platform = obj.getString("platform"),
+                        uploader = obj.getString("uploader"),
+                        fileSize = obj.getString("fileSize"),
+                        duration = obj.getString("duration"),
+                        localThumbnailPath = obj.getString("localThumbnailPath"),
+                        localFilePath = obj.getString("localFilePath"),
+                        timestamp = obj.getLong("timestamp")
+                    )
+                )
+            }
+            list
+        } catch (e: java.lang.Exception) {
+            e.printStackTrace()
+            emptyList()
+        }
+    }
+
+    private fun saveToStorage(context: Context, list: List<CompletedDownload>) {
+        val file = File(context.filesDir, FILE_NAME)
+        try {
+            val arr = JSONArray()
+            for (item in list) {
+                val obj = JSONObject()
+                obj.put("id", item.id)
+                obj.put("title", item.title)
+                obj.put("platform", item.platform)
+                obj.put("uploader", item.uploader)
+                obj.put("fileSize", item.fileSize)
+                obj.put("duration", item.duration)
+                obj.put("localThumbnailPath", item.localThumbnailPath)
+                obj.put("localFilePath", item.localFilePath)
+                obj.put("timestamp", item.timestamp)
+                arr.put(obj)
+            }
+            file.writeText(arr.toString())
+        } catch (e: java.lang.Exception) {
+            e.printStackTrace()
+        }
+    }
 }
 
 enum class Tab { HOME, DOWNLOADS, SETTINGS }
 
 @Composable
 fun App() {
-    var currentTab by remember { mutableStateOf(Tab.HOME) }
     Box(modifier = Modifier.fillMaxSize()) {
         Column(modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(bottom = 90.dp)) {
             Crossfade(
-                targetState = currentTab, 
+                targetState = NavigationState.currentTab, 
                 label = "TabTransition",
                 animationSpec = tween(400, easing = FastOutSlowInEasing)
             ) { tab ->
@@ -182,7 +305,7 @@ fun App() {
                 }
             }
         }
-        BottomNav(currentTab = currentTab, onTabSelected = { currentTab = it }, modifier = Modifier.align(Alignment.BottomCenter))
+        BottomNav(currentTab = NavigationState.currentTab, onTabSelected = { NavigationState.currentTab = it }, modifier = Modifier.align(Alignment.BottomCenter))
     }
 }
 
@@ -199,13 +322,102 @@ fun getUniqueTitle(downloadDir: File, safeTitle: String): String {
     return candidate
 }
 
-fun startDownload(context: Context, videoUrl: String, formatId: String, title: String, isAudio: Boolean = false) {
+fun downloadThumbnailLocally(context: Context, id: String, thumbnailUrl: String): String {
+    if (thumbnailUrl.isEmpty()) return ""
+    val thumbnailsDir = File(context.filesDir, "thumbnails")
+    if (!thumbnailsDir.exists()) {
+        thumbnailsDir.mkdirs()
+    }
+    val outputFile = File(thumbnailsDir, "thumb_$id.jpg")
+    var connection: HttpURLConnection? = null
+    try {
+        val url = URL(thumbnailUrl)
+        connection = url.openConnection() as HttpURLConnection
+        connection.connectTimeout = 10000
+        connection.readTimeout = 10000
+        connection.doInput = true
+        connection.connect()
+        if (connection.responseCode == HttpURLConnection.HTTP_OK) {
+            connection.inputStream.use { input ->
+                FileOutputStream(outputFile).use { output ->
+                    input.copyTo(output)
+                }
+            }
+            return outputFile.absolutePath
+        }
+    } catch (e: Exception) {
+        e.printStackTrace()
+    } finally {
+        connection?.disconnect()
+    }
+    return ""
+}
+
+fun fetchBitmapFromUrl(imageUrl: String): Bitmap? {
+    if (imageUrl.isEmpty()) return null
+    var connection: HttpURLConnection? = null
+    return try {
+        val url = URL(imageUrl)
+        connection = url.openConnection() as HttpURLConnection
+        connection.connectTimeout = 10000
+        connection.readTimeout = 10000
+        connection.doInput = true
+        connection.connect()
+        if (connection.responseCode == HttpURLConnection.HTTP_OK) {
+            BitmapFactory.decodeStream(connection.inputStream)
+        } else null
+    } catch (e: Exception) {
+        e.printStackTrace()
+        null
+    } finally {
+        connection?.disconnect()
+    }
+}
+
+fun formatSpeed(bytesPerSecond: Long): String {
+    return when {
+        bytesPerSecond >= 1024 * 1024 -> String.format(java.util.Locale.US, "%.1f MB/s", bytesPerSecond.toDouble() / (1024 * 1024))
+        bytesPerSecond >= 1024 -> String.format(java.util.Locale.US, "%.1f KB/s", bytesPerSecond.toDouble() / 1024)
+        else -> "$bytesPerSecond B/s"
+    }
+}
+
+fun formatEta(seconds: Long): String {
+    return when {
+        seconds >= 3600 -> String.format(java.util.Locale.US, "%d jam %d mnt", seconds / 3600, (seconds % 3600) / 60)
+        seconds >= 60 -> String.format(java.util.Locale.US, "%d mnt %d dtk", seconds / 60, seconds % 60)
+        else -> "$seconds dtk"
+    }
+}
+
+fun startDownload(
+    context: Context, 
+    videoUrl: String, 
+    formatId: String, 
+    title: String, 
+    isAudio: Boolean = false,
+    thumbnailUrl: String = "",
+    uploader: String = "",
+    durationSeconds: Int = 0,
+    platform: String = ""
+) {
     val downloadDir = android.os.Environment.getExternalStoragePublicDirectory(android.os.Environment.DIRECTORY_DOWNLOADS)
     val safeTitle = title.replace(Regex("[\\\\/:*?\"<>|]"), "_")
     val uniqueTitleBase = getUniqueTitle(downloadDir, safeTitle)
     val displayTitle = uniqueTitleBase.replace("_", " ")
 
     Toast.makeText(context, "Memulai unduhan: $displayTitle", Toast.LENGTH_SHORT).show()
+    
+    val activeItem = ActiveDownload(
+        id = uniqueTitleBase,
+        title = displayTitle,
+        progress = 0,
+        speed = "0 KB/s",
+        eta = "Menghubungkan...",
+        typeLabel = if (isAudio) "audio" else "video"
+    )
+    DownloadTracker.activeDownloads.add(activeItem)
+
     CoroutineScope(Dispatchers.IO).launch {
         val notificationManager = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
         val channelId = "simpanvideo_downloads"
@@ -214,20 +426,43 @@ fun startDownload(context: Context, videoUrl: String, formatId: String, title: S
             notificationManager.createNotificationChannel(channel)
         }
         val notificationId = uniqueTitleBase.hashCode()
+        
+        val intent = Intent(context, MainActivity::class.java).apply {
+            flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
+            putExtra("action", "open_downloads")
+        }
+        val pendingIntent = PendingIntent.getActivity(
+            context, 
+            notificationId, 
+            intent, 
+            PendingIntent.FLAG_UPDATE_CURRENT or (if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) PendingIntent.FLAG_IMMUTABLE else 0)
+        )
+
+        val thumbnailBitmap = fetchBitmapFromUrl(thumbnailUrl)
+
+        val remoteViews = RemoteViews(context.packageName, R.layout.custom_notification)
+        remoteViews.setTextViewText(R.id.notification_title, displayTitle)
+        remoteViews.setTextViewText(R.id.notification_creator, uploader.ifEmpty { "SimpanVideo" })
+        remoteViews.setProgressBar(R.id.notification_progress_bar, 100, 0, false)
+        remoteViews.setTextViewText(R.id.notification_progress_text, "0%")
+        if (thumbnailBitmap != null) {
+            remoteViews.setImageViewBitmap(R.id.notification_bg, thumbnailBitmap)
+        } else {
+            remoteViews.setImageViewResource(R.id.notification_bg, android.R.color.black)
+        }
+
         val builder = NotificationCompat.Builder(context, channelId)
             .setSmallIcon(android.R.drawable.stat_sys_download)
-            .setContentTitle(displayTitle)
-            .setContentText("Menyiapkan unduhan...")
+            .setCustomContentView(remoteViews)
+            .setCustomBigContentView(remoteViews)
+            .setContentIntent(pendingIntent)
             .setPriority(NotificationCompat.PRIORITY_LOW)
             .setOngoing(true)
-            .setProgress(100, 0, true)
 
         notificationManager.notify(notificationId, builder.build())
 
         try {
             val request = YoutubeDLRequest(videoUrl)
-            
-            // Set User-Agent and Referer to prevent 403 Forbidden errors from CDN hosts
             request.addOption("--user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
             if (videoUrl.contains("youtube.com") || videoUrl.contains("youtu.be")) {
                 request.addOption("--referer", "https://www.youtube.com")
@@ -245,11 +480,10 @@ fun startDownload(context: Context, videoUrl: String, formatId: String, title: S
                 }
             }
             
-            // Tanpa subfolder, langsung ke folder Downloads
             request.addOption("-o", "${downloadDir.absolutePath}/$uniqueTitleBase.%(ext)s")
-            request.addOption("-4") // Paksa IPv4 untuk menghindari delay DNS IPv6 pada Android
-            request.addOption("--no-check-formats") // Jangan cek URL format via HTTP HEAD
-            request.addOption("--cache-dir", "${context.cacheDir.absolutePath}/yt-dlp-cache") // Aktifkan caching player JS
+            request.addOption("-4")
+            request.addOption("--no-check-formats")
+            request.addOption("--cache-dir", "${context.cacheDir.absolutePath}/yt-dlp-cache")
 
             var lastProgress = -1
             var isAudioPhase = isAudio
@@ -274,57 +508,163 @@ fun startDownload(context: Context, videoUrl: String, formatId: String, title: S
                                     line?.contains("merging", ignoreCase = true) == true
 
                     val phasePrefix = when {
-                        isMerging -> "Menggabungkan Video & Audio..."
-                        isAudioPhase -> "Mengunduh Audio..."
-                        else -> "Mengunduh Video..."
+                        isMerging -> "Menggabungkan..."
+                        isAudioPhase -> "Audio"
+                        else -> "Video"
                     }
 
-                    val contentText = when {
-                        isMerging -> "Menggabungkan Video & Audio..."
-                        speed.isNotEmpty() && eta.isNotEmpty() -> "$phasePrefix $currentProgress% ($speed) · ETA $eta"
-                        speed.isNotEmpty() -> "$phasePrefix $currentProgress% ($speed)"
-                        else -> "$phasePrefix $currentProgress%"
+                    val index = DownloadTracker.activeDownloads.indexOfFirst { it.id == uniqueTitleBase }
+                    if (index != -1) {
+                        DownloadTracker.activeDownloads[index] = DownloadTracker.activeDownloads[index].copy(
+                            progress = currentProgress,
+                            speed = if (speed.isNotEmpty()) "$phasePrefix ($speed)" else phasePrefix,
+                            eta = eta
+                        )
                     }
 
-                    builder.setProgress(100, currentProgress, false)
-                        .setContentText(contentText)
-                    notificationManager.notify(notificationId, builder.build())
+                    val updateViews = RemoteViews(context.packageName, R.layout.custom_notification)
+                    updateViews.setTextViewText(R.id.notification_title, displayTitle)
+                    val creatorText = when {
+                        isMerging -> "Menggabungkan Video & Audio..."
+                        speed.isNotEmpty() && eta.isNotEmpty() -> "Mengunduh... ($speed) · ETA $eta"
+                        speed.isNotEmpty() -> "Mengunduh... ($speed)"
+                        else -> uploader.ifEmpty { "SimpanVideo" }
+                    }
+                    updateViews.setTextViewText(R.id.notification_creator, creatorText)
+                    updateViews.setProgressBar(R.id.notification_progress_bar, 100, currentProgress, false)
+                    updateViews.setTextViewText(R.id.notification_progress_text, "$currentProgress%")
+                    if (thumbnailBitmap != null) {
+                        updateViews.setImageViewBitmap(R.id.notification_bg, thumbnailBitmap)
+                    } else {
+                        updateViews.setImageViewResource(R.id.notification_bg, android.R.color.black)
+                    }
+
+                    val updateBuilder = NotificationCompat.Builder(context, channelId)
+                        .setSmallIcon(android.R.drawable.stat_sys_download)
+                        .setCustomContentView(updateViews)
+                        .setCustomBigContentView(updateViews)
+                        .setContentIntent(pendingIntent)
+                        .setPriority(NotificationCompat.PRIORITY_LOW)
+                        .setOngoing(true)
+
+                    notificationManager.notify(notificationId, updateBuilder.build())
                 }
             }
 
-            builder.setContentText("Selesai diunduh!")
-                .setProgress(0, 0, false)
-                .setOngoing(false)
+            DownloadTracker.activeDownloads.removeIf { it.id == uniqueTitleBase }
+
+            val localThumbPath = downloadThumbnailLocally(context, uniqueTitleBase, thumbnailUrl)
+
+            val files = downloadDir.listFiles() ?: emptyArray()
+            val downloadedFile = files.firstOrNull { it.nameWithoutExtension.equals(uniqueTitleBase, ignoreCase = true) }
+            val sizeStr = if (downloadedFile != null) {
+                val sizeBytes = downloadedFile.length()
+                String.format(java.util.Locale.US, "%.1f MB", sizeBytes.toDouble() / (1024 * 1024))
+            } else "0.0 MB"
+            val localFilePath = downloadedFile?.absolutePath ?: ""
+
+            val completed = CompletedDownload(
+                id = uniqueTitleBase,
+                title = displayTitle,
+                platform = platform.ifEmpty { if (videoUrl.contains("tiktok.com")) "TikTok" else "YouTube" },
+                uploader = uploader.ifEmpty { "Unknown" },
+                fileSize = sizeStr,
+                duration = formatDuration(durationSeconds),
+                localThumbnailPath = localThumbPath,
+                localFilePath = localFilePath,
+                timestamp = System.currentTimeMillis()
+            )
+            CompletedDownloadDatabase.add(context, completed)
+
+            if (downloadedFile != null) {
+                android.media.MediaScannerConnection.scanFile(context, arrayOf(downloadedFile.absolutePath), null, null)
+            }
+
+            val finishedViews = RemoteViews(context.packageName, R.layout.custom_notification)
+            finishedViews.setTextViewText(R.id.notification_title, displayTitle)
+            finishedViews.setTextViewText(R.id.notification_creator, "Selesai diunduh!")
+            finishedViews.setProgressBar(R.id.notification_progress_bar, 100, 100, false)
+            finishedViews.setTextViewText(R.id.notification_progress_text, "100%")
+            if (thumbnailBitmap != null) {
+                finishedViews.setImageViewBitmap(R.id.notification_bg, thumbnailBitmap)
+            } else {
+                finishedViews.setImageViewResource(R.id.notification_bg, android.R.color.black)
+            }
+
+            val finishedBuilder = NotificationCompat.Builder(context, channelId)
                 .setSmallIcon(android.R.drawable.stat_sys_download_done)
-            notificationManager.notify(notificationId, builder.build())
+                .setCustomContentView(finishedViews)
+                .setCustomBigContentView(finishedViews)
+                .setContentIntent(pendingIntent)
+                .setPriority(NotificationCompat.PRIORITY_LOW)
+                .setOngoing(false)
+
+            notificationManager.notify(notificationId, finishedBuilder.build())
             withContext(Dispatchers.Main) { Toast.makeText(context, "Selesai mengunduh $displayTitle", Toast.LENGTH_LONG).show() }
         } catch (e: Exception) {
             e.printStackTrace()
-            builder.setContentText("Gagal: ${e.message}")
-                .setProgress(0, 0, false)
-                .setOngoing(false)
+            DownloadTracker.activeDownloads.removeIf { it.id == uniqueTitleBase }
+
+            val errorViews = RemoteViews(context.packageName, R.layout.custom_notification)
+            errorViews.setTextViewText(R.id.notification_title, displayTitle)
+            errorViews.setTextViewText(R.id.notification_creator, "Gagal mengunduh!")
+            errorViews.setProgressBar(R.id.notification_progress_bar, 100, 0, false)
+            errorViews.setTextViewText(R.id.notification_progress_text, "Error")
+            if (thumbnailBitmap != null) {
+                errorViews.setImageViewBitmap(R.id.notification_bg, thumbnailBitmap)
+            } else {
+                errorViews.setImageViewResource(R.id.notification_bg, android.R.color.black)
+            }
+
+            val errorBuilder = NotificationCompat.Builder(context, channelId)
                 .setSmallIcon(android.R.drawable.stat_notify_error)
-            notificationManager.notify(notificationId, builder.build())
+                .setCustomContentView(errorViews)
+                .setCustomBigContentView(errorViews)
+                .setContentIntent(pendingIntent)
+                .setPriority(NotificationCompat.PRIORITY_LOW)
+                .setOngoing(false)
+
+            notificationManager.notify(notificationId, errorBuilder.build())
             withContext(Dispatchers.Main) { Toast.makeText(context, "Gagal mengunduh: ${e.message}", Toast.LENGTH_LONG).show() }
         }
     }
 }
 
-fun downloadDirectFile(context: Context, fileUrl: String, fileName: String) {
+fun downloadDirectFile(
+    context: Context, 
+    fileUrl: String, 
+    fileName: String,
+    thumbnailUrl: String = "",
+    uploader: String = "",
+    durationSeconds: Int = 0,
+    platform: String = "",
+    typeLabel: String = ""
+) {
     val downloadDir = android.os.Environment.getExternalStoragePublicDirectory(android.os.Environment.DIRECTORY_DOWNLOADS)
     val safeTitle = fileName.replace(Regex("[\\\\/:*?\"<>|]"), "_")
     val uniqueTitleBase = getUniqueTitle(downloadDir, safeTitle)
     val displayTitle = uniqueTitleBase.replace("_", " ")
 
-    val isAudio = fileUrl.contains(".mp3", ignoreCase = true) || fileName.contains("audio", ignoreCase = true)
-    val isVideo = fileUrl.contains(".mp4", ignoreCase = true) || fileName.contains("video", ignoreCase = true)
-    val typeLabel = when {
+    val isAudio = fileUrl.contains(".mp3", ignoreCase = true) || fileName.contains("audio", ignoreCase = true) || typeLabel == "audio"
+    val isVideo = fileUrl.contains(".mp4", ignoreCase = true) || fileName.contains("video", ignoreCase = true) || typeLabel == "video"
+    val resolvedTypeLabel = when {
         isAudio -> "audio"
         isVideo -> "video"
         else -> "gambar"
     }
 
-    Toast.makeText(context, "Memulai unduhan $typeLabel...", Toast.LENGTH_SHORT).show()
+    Toast.makeText(context, "Memulai unduhan $resolvedTypeLabel...", Toast.LENGTH_SHORT).show()
+
+    val activeItem = ActiveDownload(
+        id = uniqueTitleBase,
+        title = displayTitle,
+        progress = 0,
+        speed = "0 KB/s",
+        eta = "Menghubungkan...",
+        typeLabel = resolvedTypeLabel
+    )
+    DownloadTracker.activeDownloads.add(activeItem)
+
     CoroutineScope(Dispatchers.IO).launch {
         val notificationManager = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
         val channelId = "simpanvideo_downloads"
@@ -333,13 +673,38 @@ fun downloadDirectFile(context: Context, fileUrl: String, fileName: String) {
             notificationManager.createNotificationChannel(channel)
         }
         val notificationId = uniqueTitleBase.hashCode()
+        
+        val intent = Intent(context, MainActivity::class.java).apply {
+            flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
+            putExtra("action", "open_downloads")
+        }
+        val pendingIntent = PendingIntent.getActivity(
+            context, 
+            notificationId, 
+            intent, 
+            PendingIntent.FLAG_UPDATE_CURRENT or (if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) PendingIntent.FLAG_IMMUTABLE else 0)
+        )
+
+        val thumbnailBitmap = fetchBitmapFromUrl(thumbnailUrl)
+
+        val remoteViews = RemoteViews(context.packageName, R.layout.custom_notification)
+        remoteViews.setTextViewText(R.id.notification_title, displayTitle)
+        remoteViews.setTextViewText(R.id.notification_creator, uploader.ifEmpty { "SimpanVideo" })
+        remoteViews.setProgressBar(R.id.notification_progress_bar, 100, 0, false)
+        remoteViews.setTextViewText(R.id.notification_progress_text, "0%")
+        if (thumbnailBitmap != null) {
+            remoteViews.setImageViewBitmap(R.id.notification_bg, thumbnailBitmap)
+        } else {
+            remoteViews.setImageViewResource(R.id.notification_bg, android.R.color.black)
+        }
+
         val builder = NotificationCompat.Builder(context, channelId)
             .setSmallIcon(android.R.drawable.stat_sys_download)
-            .setContentTitle(displayTitle)
-            .setContentText("Mengunduh $typeLabel...")
+            .setCustomContentView(remoteViews)
+            .setCustomBigContentView(remoteViews)
+            .setContentIntent(pendingIntent)
             .setPriority(NotificationCompat.PRIORITY_LOW)
             .setOngoing(true)
-            .setProgress(100, 0, true)
 
         notificationManager.notify(notificationId, builder.build())
 
@@ -400,28 +765,111 @@ fun downloadDirectFile(context: Context, fileUrl: String, fileName: String) {
                 var totalBytesRead = 0L
                 val fileLength = connection.contentLengthLong
 
+                var lastProgress = -1
+                var lastUpdateTime = System.currentTimeMillis()
+                var lastBytesRead = 0L
+
                 while (inputStream.read(buffer).also { bytesRead = it } != -1) {
                     outputStream.write(buffer, 0, bytesRead)
                     totalBytesRead += bytesRead
+                    
                     if (fileLength > 0) {
                         val progress = ((totalBytesRead * 100) / fileLength).toInt()
-                        builder.setProgress(100, progress, false)
-                            .setContentText("Mengunduh $typeLabel... $progress%")
-                        notificationManager.notify(notificationId, builder.build())
+                        val now = System.currentTimeMillis()
+                        val timeDiff = now - lastUpdateTime
+                        
+                        if (progress != lastProgress && (timeDiff >= 1000 || progress == 100)) {
+                            lastProgress = progress
+                            
+                            val bytesDiff = totalBytesRead - lastBytesRead
+                            val speedBps = if (timeDiff > 0) (bytesDiff * 1000) / timeDiff else 0L
+                            val speedText = formatSpeed(speedBps)
+                            val etaText = if (speedBps > 0) {
+                                val secondsRemaining = (fileLength - totalBytesRead) / speedBps
+                                formatEta(secondsRemaining)
+                            } else ""
+                            
+                            lastUpdateTime = now
+                            lastBytesRead = totalBytesRead
+
+                            val index = DownloadTracker.activeDownloads.indexOfFirst { it.id == uniqueTitleBase }
+                            if (index != -1) {
+                                DownloadTracker.activeDownloads[index] = DownloadTracker.activeDownloads[index].copy(
+                                    progress = progress,
+                                    speed = speedText,
+                                    eta = etaText
+                                )
+                            }
+
+                            val updateViews = RemoteViews(context.packageName, R.layout.custom_notification)
+                            updateViews.setTextViewText(R.id.notification_title, displayTitle)
+                            updateViews.setTextViewText(R.id.notification_creator, "Mengunduh... ($speedText) · ETA $etaText")
+                            updateViews.setProgressBar(R.id.notification_progress_bar, 100, progress, false)
+                            updateViews.setTextViewText(R.id.notification_progress_text, "$progress%")
+                            if (thumbnailBitmap != null) {
+                                updateViews.setImageViewBitmap(R.id.notification_bg, thumbnailBitmap)
+                            } else {
+                                updateViews.setImageViewResource(R.id.notification_bg, android.R.color.black)
+                            }
+
+                            val updateBuilder = NotificationCompat.Builder(context, channelId)
+                                .setSmallIcon(android.R.drawable.stat_sys_download)
+                                .setCustomContentView(updateViews)
+                                .setCustomBigContentView(updateViews)
+                                .setContentIntent(pendingIntent)
+                                .setPriority(NotificationCompat.PRIORITY_LOW)
+                                .setOngoing(true)
+
+                            notificationManager.notify(notificationId, updateBuilder.build())
+                        }
                     }
                 }
                 outputStream.flush()
                 outputStream.close()
                 inputStream.close()
 
-                // Scan media library
+                DownloadTracker.activeDownloads.removeIf { it.id == uniqueTitleBase }
+
+                val localThumbPath = downloadThumbnailLocally(context, uniqueTitleBase, thumbnailUrl)
+
+                val sizeBytes = outputFile.length()
+                val sizeStr = String.format(java.util.Locale.US, "%.1f MB", sizeBytes.toDouble() / (1024 * 1024))
+
+                val completed = CompletedDownload(
+                    id = uniqueTitleBase,
+                    title = displayTitle,
+                    platform = platform.ifEmpty { if (fileUrl.contains("tiktok")) "TikTok" else "YouTube" },
+                    uploader = uploader.ifEmpty { "Unknown" },
+                    fileSize = sizeStr,
+                    duration = if (resolvedTypeLabel == "gambar") "00:00" else formatDuration(durationSeconds),
+                    localThumbnailPath = localThumbPath,
+                    localFilePath = outputFile.absolutePath,
+                    timestamp = System.currentTimeMillis()
+                )
+                CompletedDownloadDatabase.add(context, completed)
+
                 android.media.MediaScannerConnection.scanFile(context, arrayOf(outputFile.absolutePath), null, null)
 
-                builder.setContentText("Selesai diunduh!")
-                    .setProgress(0, 0, false)
-                    .setOngoing(false)
+                val finishedViews = RemoteViews(context.packageName, R.layout.custom_notification)
+                finishedViews.setTextViewText(R.id.notification_title, displayTitle)
+                finishedViews.setTextViewText(R.id.notification_creator, "Selesai diunduh!")
+                finishedViews.setProgressBar(R.id.notification_progress_bar, 100, 100, false)
+                finishedViews.setTextViewText(R.id.notification_progress_text, "100%")
+                if (thumbnailBitmap != null) {
+                    finishedViews.setImageViewBitmap(R.id.notification_bg, thumbnailBitmap)
+                } else {
+                    finishedViews.setImageViewResource(R.id.notification_bg, android.R.color.black)
+                }
+
+                val finishedBuilder = NotificationCompat.Builder(context, channelId)
                     .setSmallIcon(android.R.drawable.stat_sys_download_done)
-                notificationManager.notify(notificationId, builder.build())
+                    .setCustomContentView(finishedViews)
+                    .setCustomBigContentView(finishedViews)
+                    .setContentIntent(pendingIntent)
+                    .setPriority(NotificationCompat.PRIORITY_LOW)
+                    .setOngoing(false)
+
+                notificationManager.notify(notificationId, finishedBuilder.build())
                 withContext(Dispatchers.Main) {
                     Toast.makeText(context, "Selesai mengunduh $displayTitle", Toast.LENGTH_SHORT).show()
                 }
@@ -430,11 +878,28 @@ fun downloadDirectFile(context: Context, fileUrl: String, fileName: String) {
             }
         } catch (e: Exception) {
             e.printStackTrace()
-            builder.setContentText("Gagal mengunduh: ${e.message}")
-                .setProgress(0, 0, false)
-                .setOngoing(false)
+            DownloadTracker.activeDownloads.removeIf { it.id == uniqueTitleBase }
+
+            val errorViews = RemoteViews(context.packageName, R.layout.custom_notification)
+            errorViews.setTextViewText(R.id.notification_title, displayTitle)
+            errorViews.setTextViewText(R.id.notification_creator, "Gagal mengunduh!")
+            errorViews.setProgressBar(R.id.notification_progress_bar, 100, 0, false)
+            errorViews.setTextViewText(R.id.notification_progress_text, "Error")
+            if (thumbnailBitmap != null) {
+                errorViews.setImageViewBitmap(R.id.notification_bg, thumbnailBitmap)
+            } else {
+                errorViews.setImageViewResource(R.id.notification_bg, android.R.color.black)
+            }
+
+            val errorBuilder = NotificationCompat.Builder(context, channelId)
                 .setSmallIcon(android.R.drawable.stat_notify_error)
-            notificationManager.notify(notificationId, builder.build())
+                .setCustomContentView(errorViews)
+                .setCustomBigContentView(errorViews)
+                .setContentIntent(pendingIntent)
+                .setPriority(NotificationCompat.PRIORITY_LOW)
+                .setOngoing(false)
+
+            notificationManager.notify(notificationId, errorBuilder.build())
             withContext(Dispatchers.Main) {
                 Toast.makeText(context, "Gagal mengunduh $displayTitle: ${e.message}", Toast.LENGTH_LONG).show()
             }
@@ -859,7 +1324,16 @@ fun HomeScreen() {
                                                     Text("Unduh Gambar", color = TextMuted, fontSize = 11.sp)
                                                 }
                                                 Box(modifier = Modifier.size(36.dp).clip(CircleShape).background(GradientPrimary).clickable { 
-                                                    downloadDirectFile(context, slideUrl, "$finalTitle - Slide ${idx + 1}")
+                                                    downloadDirectFile(
+                                                        context = context, 
+                                                        fileUrl = slideUrl, 
+                                                        fileName = "$finalTitle - Slide ${idx + 1}",
+                                                        thumbnailUrl = info.thumbnail ?: "",
+                                                        uploader = info.uploader ?: "",
+                                                        durationSeconds = 0,
+                                                        platform = "TikTok",
+                                                        typeLabel = "gambar"
+                                                    )
                                                 }, contentAlignment = Alignment.Center) {
                                                     Icon(painterResource(R.drawable.ic_download), contentDescription = null, tint = Color.Black, modifier = Modifier.size(16.dp))
                                                 }
@@ -877,7 +1351,16 @@ fun HomeScreen() {
                                                     Text("mp3", color = TextMuted, fontSize = 11.sp)
                                                 }
                                                 Box(modifier = Modifier.size(36.dp).clip(CircleShape).background(GradientPrimary).clickable { 
-                                                    downloadDirectFile(context, tiktokAudioMusikUrl, "$finalTitle - Audio Musik")
+                                                    downloadDirectFile(
+                                                        context = context, 
+                                                        fileUrl = tiktokAudioMusikUrl, 
+                                                        fileName = "$finalTitle - Audio Musik",
+                                                        thumbnailUrl = info.thumbnail ?: "",
+                                                        uploader = info.uploader ?: "",
+                                                        durationSeconds = 0,
+                                                        platform = "TikTok",
+                                                        typeLabel = "audio"
+                                                    )
                                                 }, contentAlignment = Alignment.Center) {
                                                     Icon(painterResource(R.drawable.ic_download), contentDescription = null, tint = Color.Black, modifier = Modifier.size(16.dp))
                                                 }
@@ -897,7 +1380,16 @@ fun HomeScreen() {
                                                     Text("Kualitas Standar", color = TextMuted, fontSize = 11.sp)
                                                 }
                                                 Box(modifier = Modifier.size(36.dp).clip(CircleShape).background(GradientPrimary).clickable { 
-                                                    downloadDirectFile(context, tiktokVideoUrl, finalTitle)
+                                                    downloadDirectFile(
+                                                        context = context, 
+                                                        fileUrl = tiktokVideoUrl, 
+                                                        fileName = finalTitle,
+                                                        thumbnailUrl = info.thumbnail ?: "",
+                                                        uploader = info.uploader ?: "",
+                                                        durationSeconds = info.duration,
+                                                        platform = "TikTok",
+                                                        typeLabel = "video"
+                                                    )
                                                 }, contentAlignment = Alignment.Center) {
                                                     Icon(painterResource(R.drawable.ic_download), contentDescription = null, tint = Color.Black, modifier = Modifier.size(16.dp))
                                                 }
@@ -915,7 +1407,17 @@ fun HomeScreen() {
                                                     Text("mp3", color = TextMuted, fontSize = 11.sp)
                                                 }
                                                 Box(modifier = Modifier.size(36.dp).clip(CircleShape).background(GradientPrimary).clickable { 
-                                                    startDownload(context, tiktokVideoUrl, "bestaudio", finalTitle, isAudio = true)
+                                                    startDownload(
+                                                        context = context, 
+                                                        videoUrl = tiktokVideoUrl, 
+                                                        formatId = "bestaudio", 
+                                                        title = finalTitle, 
+                                                        isAudio = true,
+                                                        thumbnailUrl = info.thumbnail ?: "",
+                                                        uploader = info.uploader ?: "",
+                                                        durationSeconds = info.duration,
+                                                        platform = "TikTok"
+                                                    )
                                                 }, contentAlignment = Alignment.Center) {
                                                     Icon(painterResource(R.drawable.ic_download), contentDescription = null, tint = Color.Black, modifier = Modifier.size(16.dp))
                                                 }
@@ -933,7 +1435,16 @@ fun HomeScreen() {
                                                     Text("mp3", color = TextMuted, fontSize = 11.sp)
                                                 }
                                                 Box(modifier = Modifier.size(36.dp).clip(CircleShape).background(GradientPrimary).clickable { 
-                                                    downloadDirectFile(context, tiktokAudioMusikUrl, "$finalTitle - Audio Musik")
+                                                    downloadDirectFile(
+                                                        context = context, 
+                                                        fileUrl = tiktokAudioMusikUrl, 
+                                                        fileName = "$finalTitle - Audio Musik",
+                                                        thumbnailUrl = info.thumbnail ?: "",
+                                                        uploader = info.uploader ?: "",
+                                                        durationSeconds = 0,
+                                                        platform = "TikTok",
+                                                        typeLabel = "audio"
+                                                    )
                                                 }, contentAlignment = Alignment.Center) {
                                                     Icon(painterResource(R.drawable.ic_download), contentDescription = null, tint = Color.Black, modifier = Modifier.size(16.dp))
                                                 }
@@ -996,7 +1507,17 @@ fun HomeScreen() {
                                                 Text(option.desc, color = TextMuted, fontSize = 11.sp)
                                             }
                                             Box(modifier = Modifier.size(36.dp).clip(CircleShape).background(GradientPrimary).clickable { 
-                                                startDownload(context, urlInput, option.formatId, finalTitle, isAudio = (option.kind == "audio"))
+                                                startDownload(
+                                                    context = context, 
+                                                    videoUrl = urlInput, 
+                                                    formatId = option.formatId, 
+                                                    title = finalTitle, 
+                                                    isAudio = (option.kind == "audio"),
+                                                    thumbnailUrl = info.thumbnail ?: "",
+                                                    uploader = info.uploader ?: "",
+                                                    durationSeconds = info.duration,
+                                                    platform = "YouTube"
+                                                )
                                             }, contentAlignment = Alignment.Center) {
                                                 Icon(painterResource(R.drawable.ic_download), contentDescription = null, tint = Color.Black, modifier = Modifier.size(16.dp))
                                             }
@@ -1015,14 +1536,46 @@ fun HomeScreen() {
 @Composable
 fun DownloadsScreen() {
     var filter by remember { mutableStateOf("Semua") }
+    val context = LocalContext.current
+    
+    var itemToDelete by remember { mutableStateOf<CompletedDownload?>(null) }
+    
+    if (itemToDelete != null) {
+        AlertDialog(
+            onDismissRequest = { itemToDelete = null },
+            title = { Text("Hapus Riwayat", color = Color.White, fontWeight = FontWeight.Bold, fontFamily = PoppinsFont) },
+            text = { Text("Hapus riwayat unduhan '${itemToDelete?.title}'? File asli tidak akan dihapus dari HP Anda.", color = TextMuted, fontFamily = PoppinsFont) },
+            confirmButton = {
+                TextButton(onClick = {
+                    itemToDelete?.let { completed ->
+                        CompletedDownloadDatabase.remove(context, completed.id)
+                    }
+                    itemToDelete = null
+                }) {
+                    Text("Hapus", color = Color.Red, fontWeight = FontWeight.Bold, fontFamily = PoppinsFont)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { itemToDelete = null }) {
+                    Text("Batal", color = Color.White, fontFamily = PoppinsFont)
+                }
+            },
+            containerColor = SurfaceColor,
+            shape = RoundedCornerShape(24.dp)
+        )
+    }
+
     Column(modifier = Modifier.fillMaxSize().padding(top = 16.dp, start = 20.dp, end = 20.dp)) {
         Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
             Text("Unduhan", fontWeight = FontWeight.ExtraBold, fontSize = 20.sp, color = Color.White)
-            Box(modifier = Modifier.size(44.dp).clip(CircleShape).background(SurfaceColor).border(1.dp, BorderColor, CircleShape).clickable { }, contentAlignment = Alignment.Center) {
+            Box(modifier = Modifier.size(44.dp).clip(CircleShape).background(SurfaceColor).border(1.dp, BorderColor, CircleShape).clickable {
+                Toast.makeText(context, "Gunakan tombol hapus di setiap unduhan", Toast.LENGTH_SHORT).show()
+            }, contentAlignment = Alignment.Center) {
                 Icon(Icons.Default.List, contentDescription = null, tint = Color.White, modifier = Modifier.size(20.dp))
             }
         }
         Spacer(modifier = Modifier.height(20.dp))
+        
         Row(modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState())) {
             listOf("Semua", "Video", "Audio", "Gambar").forEach { f ->
                 val isSelected = filter == f
@@ -1033,94 +1586,262 @@ fun DownloadsScreen() {
             }
         }
         Spacer(modifier = Modifier.height(28.dp))
-        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Box(modifier = Modifier.size(8.dp).clip(CircleShape).background(CyanWarm))
-                Spacer(modifier = Modifier.width(10.dp))
-                Text("SEDANG BERJALAN · 1", fontSize = 13.sp, fontWeight = FontWeight.Bold, color = TextMuted, letterSpacing = 0.5.sp)
-            }
-            Text("Jeda semua", fontSize = 11.sp, color = CyanWarm, fontWeight = FontWeight.SemiBold, modifier = Modifier.clickable { })
-        }
-        Spacer(modifier = Modifier.height(14.dp))
-        Box(modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(24.dp)).background(SurfaceColor).border(1.dp, BorderColor, RoundedCornerShape(24.dp)).clickable { }.padding(14.dp)) {
-            Column {
+        
+        if (DownloadTracker.activeDownloads.isNotEmpty()) {
+            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    Box(modifier = Modifier.size(48.dp).clip(CircleShape).background(Color(0x2200E5FF)), contentAlignment = Alignment.Center) {
-                        Icon(painterResource(R.drawable.ic_video), contentDescription = null, tint = CyanWarm, modifier = Modifier.size(20.dp))
-                    }
-                    Spacer(modifier = Modifier.width(14.dp))
-                    Column(modifier = Modifier.weight(1f)) {
-                        Text("Funny Cat Dance Compilation 2025", color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                        Text("82.4 MB · 2.1 MB/s · 12 detik", color = TextMuted, fontSize = 11.sp, modifier = Modifier.padding(top = 4.dp))
-                    }
-                    Spacer(modifier = Modifier.width(14.dp))
-                    Box(modifier = Modifier.size(40.dp).clip(CircleShape).background(BgColor).border(1.dp, BorderColor, CircleShape).clickable { }, contentAlignment = Alignment.Center) {
-                        Icon(painterResource(R.drawable.ic_pause), contentDescription = null, tint = CyanWarm, modifier = Modifier.size(16.dp))
-                    }
-                }
-                Spacer(modifier = Modifier.height(16.dp))
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Box(modifier = Modifier.weight(1f).height(8.dp).clip(CircleShape).background(BgColor)) {
-                        Box(modifier = Modifier.fillMaxHeight().fillMaxWidth(0.7f).background(GradientPrimary))
-                    }
-                    Spacer(modifier = Modifier.width(12.dp))
-                    Text("70%", color = CyanWarm, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                    Box(modifier = Modifier.size(8.dp).clip(CircleShape).background(CyanWarm))
+                    Spacer(modifier = Modifier.width(10.dp))
+                    Text("SEDANG BERJALAN · ${DownloadTracker.activeDownloads.size}", fontSize = 13.sp, fontWeight = FontWeight.Bold, color = TextMuted, letterSpacing = 0.5.sp)
                 }
             }
+            Spacer(modifier = Modifier.height(14.dp))
+            
+            DownloadTracker.activeDownloads.forEach { active ->
+                Box(modifier = Modifier.fillMaxWidth().padding(bottom = 12.dp).clip(RoundedCornerShape(24.dp)).background(SurfaceColor).border(1.dp, BorderColor, RoundedCornerShape(24.dp)).padding(14.dp)) {
+                    Column {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Box(modifier = Modifier.size(48.dp).clip(CircleShape).background(Color(0x2200E5FF)), contentAlignment = Alignment.Center) {
+                                val iconRes = when (active.typeLabel) {
+                                    "audio" -> R.drawable.ic_audio
+                                    "gambar" -> R.drawable.ic_slide
+                                    else -> R.drawable.ic_video
+                                }
+                                Icon(painterResource(iconRes), contentDescription = null, tint = CyanWarm, modifier = Modifier.size(20.dp))
+                            }
+                            Spacer(modifier = Modifier.width(14.dp))
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(active.title, color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                val descText = if (active.speed.isNotEmpty() && active.eta.isNotEmpty()) {
+                                    "${active.speed} · ETA ${active.eta}"
+                                } else if (active.speed.isNotEmpty()) {
+                                    active.speed
+                                } else active.eta
+                                Text(descText.ifEmpty { "Menghubungkan..." }, color = TextMuted, fontSize = 11.sp, modifier = Modifier.padding(top = 4.dp))
+                            }
+                        }
+                        Spacer(modifier = Modifier.height(16.dp))
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Box(modifier = Modifier.weight(1f).height(8.dp).clip(CircleShape).background(BgColor)) {
+                                Box(modifier = Modifier.fillMaxHeight().fillMaxWidth(active.progress / 100f).background(GradientPrimary))
+                            }
+                            Spacer(modifier = Modifier.width(12.dp))
+                            Text("${active.progress}%", color = CyanWarm, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                        }
+                    }
+                }
+            }
+            Spacer(modifier = Modifier.height(18.dp))
         }
-        Spacer(modifier = Modifier.height(30.dp))
+        
         Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
             Text("SELESAI · OFFLINE", fontSize = 13.sp, fontWeight = FontWeight.Bold, color = TextMuted, letterSpacing = 0.5.sp)
-            Text("Urutkan", fontSize = 11.sp, color = CyanWarm, fontWeight = FontWeight.SemiBold, modifier = Modifier.clickable { })
         }
         Spacer(modifier = Modifier.height(14.dp))
         
-        Box(modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(24.dp)).background(SurfaceColor).border(1.dp, BorderColor, RoundedCornerShape(24.dp)).clickable { }.padding(14.dp)) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Box(modifier = Modifier.width(50.dp).height(75.dp).clip(RoundedCornerShape(12.dp)).background(Brush.linearGradient(listOf(Color(0xFF000000), Color(0xFF333333))))) {
-                    Text("0:42", color = Color.White, fontSize = 9.sp, fontWeight = FontWeight.Bold, modifier = Modifier.align(Alignment.BottomEnd).padding(4.dp).background(Color(0x99000000), RoundedCornerShape(4.dp)).padding(horizontal = 4.dp, vertical = 2.dp))
-                }
-                Spacer(modifier = Modifier.width(14.dp))
-                Column(modifier = Modifier.weight(1f)) {
-                    Text("Man playing guitar in the rain - cinematic", color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.SemiBold, maxLines = 2, overflow = TextOverflow.Ellipsis)
-                    Row(modifier = Modifier.padding(top = 6.dp), verticalAlignment = Alignment.CenterVertically) {
-                        Box(modifier = Modifier.clip(RoundedCornerShape(6.dp)).background(BgColor).border(1.dp, BorderColor, RoundedCornerShape(6.dp)).padding(horizontal = 6.dp, vertical = 3.dp)) {
-                            Text("TikTok", color = TextMuted, fontSize = 10.sp)
-                        }
-                        Spacer(modifier = Modifier.width(8.dp))
-                        Text("@unsplash", color = TextMuted, fontSize = 11.sp)
-                    }
-                    Text("48.2 MB", color = TextMuted, fontSize = 11.sp, modifier = Modifier.padding(top = 4.dp))
-                }
-                Spacer(modifier = Modifier.width(14.dp))
-                Box(modifier = Modifier.size(40.dp).clip(CircleShape).glow(alpha = 0.2f).background(GradientPrimary).clickable { }, contentAlignment = Alignment.Center) {
-                    Icon(painterResource(R.drawable.ic_play), contentDescription = null, tint = Color.Black, modifier = Modifier.size(16.dp))
-                }
+        val completedList = CompletedDownloadDatabase.completedList
+        val filteredList = when (filter) {
+            "Video" -> completedList.filter { it.localFilePath.endsWith(".mp4", ignoreCase = true) || it.localFilePath.contains("video", ignoreCase = true) }
+            "Audio" -> completedList.filter { it.localFilePath.endsWith(".mp3", ignoreCase = true) || it.localFilePath.contains("audio", ignoreCase = true) }
+            "Gambar" -> completedList.filter { it.localFilePath.endsWith(".png", ignoreCase = true) || it.localFilePath.endsWith(".jpg", ignoreCase = true) || it.localFilePath.endsWith(".jpeg", ignoreCase = true) || it.localFilePath.endsWith(".webp", ignoreCase = true) || it.localFilePath.contains("gambar", ignoreCase = true) }
+            else -> completedList
+        }
+        
+        if (filteredList.isEmpty()) {
+            Box(modifier = Modifier.fillMaxWidth().height(150.dp), contentAlignment = Alignment.Center) {
+                Text("Belum ada berkas terunduh", color = TextMuted, fontSize = 13.sp)
             }
-        }
-        
-        Spacer(modifier = Modifier.height(14.dp))
-
-        Box(modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(24.dp)).background(SurfaceColor).border(1.dp, BorderColor, RoundedCornerShape(24.dp)).clickable { }.padding(14.dp)) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Box(modifier = Modifier.width(80.dp).height(45.dp).clip(RoundedCornerShape(12.dp)).background(Brush.linearGradient(listOf(Color(0xFF8B0000), Color(0xFFFF8C00))))) {
-                    Text("6:13", color = Color.White, fontSize = 9.sp, fontWeight = FontWeight.Bold, modifier = Modifier.align(Alignment.BottomEnd).padding(4.dp).background(Color(0x99000000), RoundedCornerShape(4.dp)).padding(horizontal = 4.dp, vertical = 2.dp))
-                }
-                Spacer(modifier = Modifier.width(14.dp))
-                Column(modifier = Modifier.weight(1f)) {
-                    Text("Moha Jadu | Coke Studio Bangla S2", color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.SemiBold, maxLines = 2, overflow = TextOverflow.Ellipsis)
-                    Row(modifier = Modifier.padding(top = 6.dp), verticalAlignment = Alignment.CenterVertically) {
-                        Box(modifier = Modifier.clip(RoundedCornerShape(6.dp)).background(BgColor).border(1.dp, BorderColor, RoundedCornerShape(6.dp)).padding(horizontal = 6.dp, vertical = 3.dp)) {
-                            Text("YouTube", color = TextMuted, fontSize = 10.sp)
+        } else {
+            Column(modifier = Modifier.verticalScroll(rememberScrollState())) {
+                filteredList.forEach { completed ->
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(bottom = 14.dp)
+                            .height(110.dp)
+                            .clip(RoundedCornerShape(24.dp))
+                            .background(SurfaceColor)
+                            .border(1.dp, BorderColor, RoundedCornerShape(24.dp))
+                            .clickable {
+                                try {
+                                    val file = File(completed.localFilePath)
+                                    if (file.exists()) {
+                                        val uri = androidx.core.content.FileProvider.getUriForFile(
+                                            context,
+                                            "com.simpanvideo.app.provider",
+                                            file
+                                        )
+                                        val mimeType = context.contentResolver.getType(uri) ?: when {
+                                            completed.localFilePath.endsWith(".mp4", ignoreCase = true) -> "video/mp4"
+                                            completed.localFilePath.endsWith(".mp3", ignoreCase = true) -> "audio/mpeg"
+                                            completed.localFilePath.endsWith(".png", ignoreCase = true) -> "image/png"
+                                            completed.localFilePath.endsWith(".jpg", ignoreCase = true) || completed.localFilePath.endsWith(".jpeg", ignoreCase = true) -> "image/jpeg"
+                                            else -> "*/*"
+                                        }
+                                        val intent = Intent(Intent.ACTION_VIEW).apply {
+                                            setDataAndType(uri, mimeType)
+                                            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                                        }
+                                        context.startActivity(intent)
+                                    } else {
+                                        Toast.makeText(context, "Berkas tidak ditemukan di HP", Toast.LENGTH_SHORT).show()
+                                    }
+                                } catch (e: Exception) {
+                                    e.printStackTrace()
+                                    Toast.makeText(context, "Gagal memutar berkas", Toast.LENGTH_SHORT).show()
+                                }
+                            }
+                    ) {
+                        if (completed.localThumbnailPath.isNotEmpty() && File(completed.localThumbnailPath).exists()) {
+                            AsyncImage(
+                                model = File(completed.localThumbnailPath),
+                                contentDescription = null,
+                                modifier = Modifier.fillMaxSize(),
+                                contentScale = ContentScale.Crop
+                            )
                         }
-                        Spacer(modifier = Modifier.width(8.dp))
-                        Text("Coke Studio", color = TextMuted, fontSize = 11.sp)
+
+                        Box(
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .background(
+                                    Brush.verticalGradient(
+                                        listOf(
+                                            Color(0x33000000),
+                                            Color(0xD9000000)
+                                        )
+                                    )
+                                )
+                        )
+
+                        val shadowStyle = TextStyle(
+                            fontFamily = PoppinsFont,
+                            color = Color.White,
+                            shadow = Shadow(
+                                color = Color.Black,
+                                offset = Offset(2f, 2f),
+                                blurRadius = 4f
+                            )
+                        )
+                        val shadowMutedStyle = TextStyle(
+                            fontFamily = PoppinsFont,
+                            color = Color(0xFFE0E0E0),
+                            shadow = Shadow(
+                                color = Color.Black,
+                                offset = Offset(1.5f, 1.5f),
+                                blurRadius = 3f
+                            )
+                        )
+
+                        Row(
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .padding(14.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = completed.title,
+                                    style = shadowStyle.copy(fontSize = 13.sp, fontWeight = FontWeight.Bold),
+                                    maxLines = 2,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                                Spacer(modifier = Modifier.height(4.dp))
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    Box(
+                                        modifier = Modifier
+                                            .clip(RoundedCornerShape(6.dp))
+                                            .background(Color(0x80000000))
+                                            .border(0.5.dp, BorderColor, RoundedCornerShape(6.dp))
+                                            .padding(horizontal = 6.dp, vertical = 2.dp)
+                                    ) {
+                                        Text(
+                                            text = completed.platform,
+                                            style = shadowStyle.copy(fontSize = 8.sp, fontWeight = FontWeight.SemiBold)
+                                        )
+                                    }
+                                    Spacer(modifier = Modifier.width(8.dp))
+                                    Text(
+                                        text = completed.uploader,
+                                        style = shadowMutedStyle.copy(fontSize = 11.sp, fontWeight = FontWeight.Medium)
+                                    )
+                                }
+                                Spacer(modifier = Modifier.height(2.dp))
+                                Text(
+                                    text = "${completed.fileSize} · ${if(completed.duration == "00:00") "Gambar" else completed.duration}",
+                                    style = shadowMutedStyle.copy(fontSize = 10.sp)
+                                )
+                            }
+
+                            Spacer(modifier = Modifier.width(10.dp))
+
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Box(
+                                    modifier = Modifier
+                                        .size(36.dp)
+                                        .clip(CircleShape)
+                                        .background(GradientPrimary)
+                                        .clickable {
+                                            try {
+                                                val file = File(completed.localFilePath)
+                                                if (file.exists()) {
+                                                    val uri = androidx.core.content.FileProvider.getUriForFile(
+                                                        context,
+                                                        "com.simpanvideo.app.provider",
+                                                        file
+                                                    )
+                                                    val mimeType = context.contentResolver.getType(uri) ?: when {
+                                                        completed.localFilePath.endsWith(".mp4", ignoreCase = true) -> "video/mp4"
+                                                        completed.localFilePath.endsWith(".mp3", ignoreCase = true) -> "audio/mpeg"
+                                                        completed.localFilePath.endsWith(".png", ignoreCase = true) -> "image/png"
+                                                        completed.localFilePath.endsWith(".jpg", ignoreCase = true) || completed.localFilePath.endsWith(".jpeg", ignoreCase = true) -> "image/jpeg"
+                                                        else -> "*/*"
+                                                    }
+                                                    val intent = Intent(Intent.ACTION_VIEW).apply {
+                                                        setDataAndType(uri, mimeType)
+                                                        addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                                                    }
+                                                    context.startActivity(intent)
+                                                } else {
+                                                    Toast.makeText(context, "Berkas tidak ditemukan", Toast.LENGTH_SHORT).show()
+                                                }
+                                            } catch (e: Exception) {
+                                                e.printStackTrace()
+                                                Toast.makeText(context, "Gagal memutar berkas", Toast.LENGTH_SHORT).show()
+                                            }
+                                        },
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    Icon(
+                                        painterResource(R.drawable.ic_play),
+                                        contentDescription = null,
+                                        tint = Color.Black,
+                                        modifier = Modifier.size(14.dp)
+                                    )
+                                }
+                                
+                                Spacer(modifier = Modifier.width(8.dp))
+
+                                Box(
+                                    modifier = Modifier
+                                        .size(36.dp)
+                                        .clip(CircleShape)
+                                        .background(Color(0x33FF0000))
+                                        .clickable {
+                                            itemToDelete = completed
+                                        },
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.Delete,
+                                        contentDescription = null,
+                                        tint = Color.Red,
+                                        modifier = Modifier.size(16.dp)
+                                    )
+                                }
+                            }
+                        }
                     }
-                    Text("124.6 MB", color = TextMuted, fontSize = 11.sp, modifier = Modifier.padding(top = 4.dp))
-                }
-                Spacer(modifier = Modifier.width(14.dp))
-                Box(modifier = Modifier.size(40.dp).clip(CircleShape).glow(alpha = 0.2f).background(GradientPrimary).clickable { }, contentAlignment = Alignment.Center) {
-                    Icon(painterResource(R.drawable.ic_play), contentDescription = null, tint = Color.Black, modifier = Modifier.size(16.dp))
                 }
             }
         }
