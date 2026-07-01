@@ -61,7 +61,11 @@ import java.io.File
 import android.widget.Toast
 import android.content.pm.PackageManager
 import androidx.core.app.ActivityCompat
-import androidx.core.content.ContextCompat
+import java.net.HttpURLConnection
+import java.net.URL
+import java.io.FileOutputStream
+import android.content.Intent
+import android.net.Uri
 
 val BgColor = Color(0xFF0D1117)
 val SurfaceColor = Color(0xFF161B22)
@@ -221,8 +225,13 @@ fun startDownload(context: Context, videoUrl: String, formatId: String, title: S
 
         try {
             val request = YoutubeDLRequest(videoUrl)
-            // formatId sudah mencakup string lengkap (tidak butuh if-else isAudio)
-            request.addOption("-f", formatId)
+            if (isAudio) {
+                request.addOption("-f", "bestaudio/best")
+                request.addOption("--extract-audio")
+                request.addOption("--audio-format", "mp3")
+            } else {
+                request.addOption("-f", formatId)
+            }
             
             // Tanpa subfolder, langsung ke folder Downloads
             request.addOption("-o", "${downloadDir.absolutePath}/$uniqueTitleBase.%(ext)s")
@@ -285,6 +294,97 @@ fun startDownload(context: Context, videoUrl: String, formatId: String, title: S
                 .setSmallIcon(android.R.drawable.stat_notify_error)
             notificationManager.notify(notificationId, builder.build())
             withContext(Dispatchers.Main) { Toast.makeText(context, "Gagal mengunduh: ${e.message}", Toast.LENGTH_LONG).show() }
+        }
+    }
+}
+
+fun downloadDirectFile(context: Context, fileUrl: String, fileName: String) {
+    val downloadDir = android.os.Environment.getExternalStoragePublicDirectory(android.os.Environment.DIRECTORY_DOWNLOADS)
+    val safeTitle = fileName.replace(Regex("[\\\\/:*?\"<>|]"), "_")
+    val uniqueTitleBase = getUniqueTitle(downloadDir, safeTitle)
+    val displayTitle = uniqueTitleBase.replace("_", " ")
+
+    Toast.makeText(context, "Memulai unduhan gambar...", Toast.LENGTH_SHORT).show()
+    CoroutineScope(Dispatchers.IO).launch {
+        val notificationManager = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+        val channelId = "simpanvideo_downloads"
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            val channel = NotificationChannel(channelId, "Unduhan", NotificationManager.IMPORTANCE_LOW)
+            notificationManager.createNotificationChannel(channel)
+        }
+        val notificationId = uniqueTitleBase.hashCode()
+        val builder = NotificationCompat.Builder(context, channelId)
+            .setSmallIcon(android.R.drawable.stat_sys_download)
+            .setContentTitle(displayTitle)
+            .setContentText("Mengunduh gambar...")
+            .setPriority(NotificationCompat.PRIORITY_LOW)
+            .setOngoing(true)
+            .setProgress(100, 0, true)
+
+        notificationManager.notify(notificationId, builder.build())
+
+        try {
+            val url = URL(fileUrl)
+            val connection = url.openConnection() as HttpURLConnection
+            connection.requestMethod = "GET"
+            connection.connectTimeout = 10000
+            connection.readTimeout = 10000
+            connection.connect()
+
+            if (connection.responseCode == HttpURLConnection.HTTP_OK) {
+                val inputStream = connection.inputStream
+                val contentType = connection.contentType
+                val ext = when {
+                    contentType != null && contentType.contains("image/png") -> "png"
+                    contentType != null && contentType.contains("image/webp") -> "webp"
+                    else -> "jpg"
+                }
+                val outputFile = File(downloadDir, "$uniqueTitleBase.$ext")
+                val outputStream = FileOutputStream(outputFile)
+
+                val buffer = ByteArray(4096)
+                var bytesRead: Int
+                var totalBytesRead = 0L
+                val fileLength = connection.contentLengthLong
+
+                while (inputStream.read(buffer).also { bytesRead = it } != -1) {
+                    outputStream.write(buffer, 0, bytesRead)
+                    totalBytesRead += bytesRead
+                    if (fileLength > 0) {
+                        val progress = ((totalBytesRead * 100) / fileLength).toInt()
+                        builder.setProgress(100, progress, false)
+                            .setContentText("Mengunduh gambar... $progress%")
+                        notificationManager.notify(notificationId, builder.build())
+                    }
+                }
+                outputStream.flush()
+                outputStream.close()
+                inputStream.close()
+
+                // Scan media library
+                android.media.MediaScannerConnection.scanFile(context, arrayOf(outputFile.absolutePath), null, null)
+
+                builder.setContentText("Selesai diunduh!")
+                    .setProgress(0, 0, false)
+                    .setOngoing(false)
+                    .setSmallIcon(android.R.drawable.stat_sys_download_done)
+                notificationManager.notify(notificationId, builder.build())
+                withContext(Dispatchers.Main) {
+                    Toast.makeText(context, "Selesai mengunduh $displayTitle", Toast.LENGTH_SHORT).show()
+                }
+            } else {
+                throw Exception("HTTP error code: ${connection.responseCode}")
+            }
+        } catch (e: Exception) {
+            e.printStackTrace()
+            builder.setContentText("Gagal: ${e.message}")
+                .setProgress(0, 0, false)
+                .setOngoing(false)
+                .setSmallIcon(android.R.drawable.stat_notify_error)
+            notificationManager.notify(notificationId, builder.build())
+            withContext(Dispatchers.Main) {
+                Toast.makeText(context, "Gagal mengunduh gambar: ${e.message}", Toast.LENGTH_LONG).show()
+            }
         }
     }
 }
@@ -371,6 +471,9 @@ fun HomeScreen() {
     var errorMessage by remember { mutableStateOf<String?>(null) }
     var parsedQualities by remember { mutableStateOf<Map<String, Long>>(emptyMap()) }
     var videoType by remember { mutableStateOf("reguler") }
+    var tiktokVideoUrl by remember { mutableStateOf("") }
+    var tiktokAudioMusikUrl by remember { mutableStateOf("") }
+    var tiktokSlides by remember { mutableStateOf<List<String>>(emptyList()) }
     
     val coroutineScope = rememberCoroutineScope()
     val clipboardManager = LocalClipboardManager.current
@@ -382,12 +485,18 @@ fun HomeScreen() {
         mediaInfo = null
         parsedQualities = emptyMap()
         videoType = "reguler"
+        tiktokVideoUrl = ""
+        tiktokAudioMusikUrl = ""
+        tiktokSlides = emptyList()
         openOptions = false
         
         coroutineScope.launch {
             try {
                 var tempQualities = emptyMap<String, Long>()
                 var tempType = "reguler"
+                var tempTiktokVideoUrl = ""
+                var tempTiktokAudioMusikUrl = ""
+                var tempTiktokSlides = emptyList<String>()
                 val info = withContext(Dispatchers.IO) {
                     val isYoutube = urlInput.contains("youtube.com", ignoreCase = true) || urlInput.contains("youtu.be", ignoreCase = true)
                     val isTikTok = urlInput.contains("tiktok.com", ignoreCase = true)
@@ -409,6 +518,10 @@ fun HomeScreen() {
                         try {
                             val scraped = MetadataScraper.fetchTikTokMetadata(urlInput)
                             if (scraped != null) {
+                                tempType = scraped.videoType
+                                tempTiktokVideoUrl = scraped.tiktokVideoUrl
+                                tempTiktokAudioMusikUrl = scraped.tiktokAudioMusikUrl
+                                tempTiktokSlides = scraped.tiktokSlides
                                 result = mapToVideoInfo(scraped)
                             }
                         } catch (e: Exception) {
@@ -438,6 +551,9 @@ fun HomeScreen() {
                 }
                 parsedQualities = tempQualities
                 videoType = tempType
+                tiktokVideoUrl = tempTiktokVideoUrl
+                tiktokAudioMusikUrl = tempTiktokAudioMusikUrl
+                tiktokSlides = tempTiktokSlides
                 mediaInfo = info
             } catch (e: Exception) {
                 e.printStackTrace()
@@ -578,7 +694,9 @@ fun HomeScreen() {
                             Icon(painterResource(if (isTikTok) R.drawable.ic_tiktok_mini else R.drawable.ic_youtube), contentDescription = null, tint = Color.White, modifier = Modifier.size(14.dp))
                             Spacer(modifier = Modifier.width(6.dp))
                             Text(
-                                text = if (isTikTok) "TikTok" else {
+                                text = if (isTikTok) {
+                                    if (videoType == "Tiktok Slide") "TikTok Slide" else "TikTok Video"
+                                } else {
                                     when (videoType) {
                                         "short" -> "YouTube Short"
                                         "live" -> "YouTube Live"
@@ -590,11 +708,26 @@ fun HomeScreen() {
                                 fontWeight = FontWeight.SemiBold
                             )
                         }
-                        Box(modifier = Modifier.align(Alignment.TopEnd).padding(12.dp).clip(RoundedCornerShape(12.dp)).background(Color(0x80000000)).padding(horizontal = 8.dp, vertical = 4.dp)) {
-                            Text(durationStr, color = Color.White, fontSize = 10.sp, fontWeight = FontWeight.SemiBold)
+                        
+                        if (isTikTok && videoType == "Tiktok Slide" && tiktokSlides.isNotEmpty()) {
+                            Box(modifier = Modifier.align(Alignment.TopEnd).padding(12.dp).clip(RoundedCornerShape(12.dp)).background(Color(0x80000000)).padding(horizontal = 8.dp, vertical = 4.dp)) {
+                                Text("${tiktokSlides.size} Slide", color = Color.White, fontSize = 10.sp, fontWeight = FontWeight.SemiBold)
+                            }
+                        } else if (info.duration > 0) {
+                            Box(modifier = Modifier.align(Alignment.TopEnd).padding(12.dp).clip(RoundedCornerShape(12.dp)).background(Color(0x80000000)).padding(horizontal = 8.dp, vertical = 4.dp)) {
+                                Text(durationStr, color = Color.White, fontSize = 10.sp, fontWeight = FontWeight.SemiBold)
+                            }
                         }
                         
-                        Box(modifier = Modifier.align(Alignment.Center).size(64.dp).glow(Color.White, 0.1f, 10f).clip(CircleShape).background(Color.White).clickable { }, contentAlignment = Alignment.Center) {
+                        Box(modifier = Modifier.align(Alignment.Center).size(64.dp).glow(Color.White, 0.1f, 10f).clip(CircleShape).background(Color.White).clickable {
+                            val playUrl = if (isTikTok && tiktokVideoUrl.isNotEmpty()) tiktokVideoUrl else urlInput
+                            try {
+                                val intent = Intent(Intent.ACTION_VIEW, Uri.parse(playUrl))
+                                context.startActivity(intent)
+                            } catch (e: Exception) {
+                                Toast.makeText(context, "Tidak dapat memutar video", Toast.LENGTH_SHORT).show()
+                            }
+                        }, contentAlignment = Alignment.Center) {
                             Icon(painterResource(R.drawable.ic_play_large), contentDescription = null, tint = CyanWarm, modifier = Modifier.size(24.dp))
                         }
                     }
@@ -608,7 +741,6 @@ fun HomeScreen() {
                                 Text(info.uploader ?: "Unknown", color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
                                 Text("$viewsStr views · $likesStr likes", color = TextMuted, fontSize = 12.sp)
                             }
-                            Text("Buka", color = CyanWarm, fontSize = 12.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.clickable { })
                         }
 
                         Spacer(modifier = Modifier.height(14.dp))
@@ -622,63 +754,161 @@ fun HomeScreen() {
                             Column(modifier = Modifier.padding(top = 8.dp)) {
                                 val context = LocalContext.current
                                 
-                                data class DlOption(val label: String, val desc: String, val kind: String, val formatId: String, val height: Int = 0)
-                                
-                                val downloadOptions = listOf(
-                                    DlOption("2160p (4K)", "Ultra HD", "video", "bestvideo[height<=2160]+bestaudio/best", 2160),
-                                    DlOption("1440p (2K)", "Quad HD", "video", "bestvideo[height<=1440]+bestaudio/best", 1440),
-                                    DlOption("1080p", "Full HD", "video", "bestvideo[height<=1080]+bestaudio/best", 1080),
-                                    DlOption("720p", "High Definition", "video", "bestvideo[height<=720]+bestaudio/best", 720),
-                                    DlOption("480p", "Standard", "video", "bestvideo[height<=480]+bestaudio/best", 480),
-                                    DlOption("360p", "Low", "video", "bestvideo[height<=360]+bestaudio/best", 360),
-                                    DlOption("240p", "Sangat Rendah", "video", "bestvideo[height<=240]+bestaudio/best", 240),
-                                    DlOption("Audio", "MP3", "audio", "bestaudio/best", 0)
-                                )
-
-                                val filteredOptions = if (parsedQualities.isNotEmpty()) {
-                                    downloadOptions.filter { option ->
-                                        option.kind == "audio" ||
-                                        parsedQualities.containsKey("${option.height}p")
+                                if (isTikTok) {
+                                    if (videoType == "Tiktok Slide") {
+                                        // 1. Image Slides
+                                        tiktokSlides.forEachIndexed { idx, slideUrl ->
+                                            Row(modifier = Modifier.fillMaxWidth().padding(top = 8.dp).clip(RoundedCornerShape(20.dp)).background(Color(0x80161B22)).border(1.dp, BorderColor, RoundedCornerShape(20.dp)).padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
+                                                Box(modifier = Modifier.size(36.dp).clip(CircleShape).background(Color(0x22FE2C55)), contentAlignment = Alignment.Center) {
+                                                    Icon(painterResource(R.drawable.ic_slide), contentDescription = null, tint = Color(0xFFFE2C55), modifier = Modifier.size(16.dp))
+                                                }
+                                                Spacer(modifier = Modifier.width(12.dp))
+                                                Column(modifier = Modifier.weight(1f)) {
+                                                    Text("Slide ${idx + 1}", color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+                                                    Text("Unduh Gambar", color = TextMuted, fontSize = 11.sp)
+                                                }
+                                                Box(modifier = Modifier.size(36.dp).clip(CircleShape).background(GradientPrimary).clickable { 
+                                                    downloadDirectFile(context, slideUrl, "$finalTitle - Slide ${idx + 1}")
+                                                }, contentAlignment = Alignment.Center) {
+                                                    Icon(painterResource(R.drawable.ic_download), contentDescription = null, tint = Color.Black, modifier = Modifier.size(16.dp))
+                                                }
+                                            }
+                                        }
+                                        // 2. Audio Musik
+                                        if (tiktokAudioMusikUrl.isNotEmpty()) {
+                                            Row(modifier = Modifier.fillMaxWidth().padding(top = 8.dp).clip(RoundedCornerShape(20.dp)).background(Color(0x80161B22)).border(1.dp, BorderColor, RoundedCornerShape(20.dp)).padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
+                                                Box(modifier = Modifier.size(36.dp).clip(CircleShape).background(Color(0x33A020F0)), contentAlignment = Alignment.Center) {
+                                                    Icon(painterResource(R.drawable.ic_audio), contentDescription = null, tint = CyanWarm, modifier = Modifier.size(16.dp))
+                                                }
+                                                Spacer(modifier = Modifier.width(12.dp))
+                                                Column(modifier = Modifier.weight(1f)) {
+                                                    Text("audio musik", color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+                                                    Text("mp3", color = TextMuted, fontSize = 11.sp)
+                                                }
+                                                Box(modifier = Modifier.size(36.dp).clip(CircleShape).background(GradientPrimary).clickable { 
+                                                    startDownload(context, tiktokAudioMusikUrl, "best", "$finalTitle - Audio Musik", isAudio = false)
+                                                }, contentAlignment = Alignment.Center) {
+                                                    Icon(painterResource(R.drawable.ic_download), contentDescription = null, tint = Color.Black, modifier = Modifier.size(16.dp))
+                                                }
+                                            }
+                                        }
+                                    } else {
+                                        // TikTok Video
+                                        // 1. Video
+                                        if (tiktokVideoUrl.isNotEmpty()) {
+                                            Row(modifier = Modifier.fillMaxWidth().padding(top = 8.dp).clip(RoundedCornerShape(20.dp)).background(Color(0x80161B22)).border(1.dp, BorderColor, RoundedCornerShape(20.dp)).padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
+                                                Box(modifier = Modifier.size(36.dp).clip(CircleShape).background(Color(0x2200E5FF)), contentAlignment = Alignment.Center) {
+                                                    Icon(painterResource(R.drawable.ic_video), contentDescription = null, tint = CyanWarm, modifier = Modifier.size(16.dp))
+                                                }
+                                                Spacer(modifier = Modifier.width(12.dp))
+                                                Column(modifier = Modifier.weight(1f)) {
+                                                    Text("video", color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+                                                    Text("Kualitas Standar", color = TextMuted, fontSize = 11.sp)
+                                                }
+                                                Box(modifier = Modifier.size(36.dp).clip(CircleShape).background(GradientPrimary).clickable { 
+                                                    startDownload(context, tiktokVideoUrl, "best", finalTitle, isAudio = false)
+                                                }, contentAlignment = Alignment.Center) {
+                                                    Icon(painterResource(R.drawable.ic_download), contentDescription = null, tint = Color.Black, modifier = Modifier.size(16.dp))
+                                                }
+                                            }
+                                        }
+                                        // 2. Audio Konten
+                                        if (tiktokVideoUrl.isNotEmpty()) {
+                                            Row(modifier = Modifier.fillMaxWidth().padding(top = 8.dp).clip(RoundedCornerShape(20.dp)).background(Color(0x80161B22)).border(1.dp, BorderColor, RoundedCornerShape(20.dp)).padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
+                                                Box(modifier = Modifier.size(36.dp).clip(CircleShape).background(Color(0x33A020F0)), contentAlignment = Alignment.Center) {
+                                                    Icon(painterResource(R.drawable.ic_audio), contentDescription = null, tint = CyanWarm, modifier = Modifier.size(16.dp))
+                                                }
+                                                Spacer(modifier = Modifier.width(12.dp))
+                                                Column(modifier = Modifier.weight(1f)) {
+                                                    Text("audio konten", color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+                                                    Text("mp3", color = TextMuted, fontSize = 11.sp)
+                                                }
+                                                Box(modifier = Modifier.size(36.dp).clip(CircleShape).background(GradientPrimary).clickable { 
+                                                    startDownload(context, tiktokVideoUrl, "bestaudio", finalTitle, isAudio = true)
+                                                }, contentAlignment = Alignment.Center) {
+                                                    Icon(painterResource(R.drawable.ic_download), contentDescription = null, tint = Color.Black, modifier = Modifier.size(16.dp))
+                                                }
+                                            }
+                                        }
+                                        // 3. Audio Musik
+                                        if (tiktokAudioMusikUrl.isNotEmpty()) {
+                                            Row(modifier = Modifier.fillMaxWidth().padding(top = 8.dp).clip(RoundedCornerShape(20.dp)).background(Color(0x80161B22)).border(1.dp, BorderColor, RoundedCornerShape(20.dp)).padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
+                                                Box(modifier = Modifier.size(36.dp).clip(CircleShape).background(Color(0x33A020F0)), contentAlignment = Alignment.Center) {
+                                                    Icon(painterResource(R.drawable.ic_audio), contentDescription = null, tint = CyanWarm, modifier = Modifier.size(16.dp))
+                                                }
+                                                Spacer(modifier = Modifier.width(12.dp))
+                                                Column(modifier = Modifier.weight(1f)) {
+                                                    Text("audio musik", color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+                                                    Text("mp3", color = TextMuted, fontSize = 11.sp)
+                                                }
+                                                Box(modifier = Modifier.size(36.dp).clip(CircleShape).background(GradientPrimary).clickable { 
+                                                    startDownload(context, tiktokAudioMusikUrl, "best", "$finalTitle - Audio Musik", isAudio = false)
+                                                }, contentAlignment = Alignment.Center) {
+                                                    Icon(painterResource(R.drawable.ic_download), contentDescription = null, tint = Color.Black, modifier = Modifier.size(16.dp))
+                                                }
+                                            }
+                                        }
                                     }
                                 } else {
-                                    downloadOptions
-                                }
-
-                                val finalOptions = filteredOptions.map { option ->
-                                    val sizeBytes = when {
-                                        option.kind == "video" -> {
-                                            val vSize = parsedQualities["${option.height}p"] ?: 0L
-                                            val aSize = parsedQualities["audio"] ?: 0L
-                                            if (vSize > 0L) vSize + aSize else 0L
-                                        }
-                                        option.label == "Audio" -> {
-                                            parsedQualities["audio"] ?: 0L
-                                        }
-                                        else -> 0L
-                                    }
+                                    // YouTube Options
+                                    data class DlOption(val label: String, val desc: String, val kind: String, val formatId: String, val height: Int = 0)
                                     
-                                    if (sizeBytes > 0L) {
-                                        val sizeMb = String.format("%.1f MB", sizeBytes / (1024.0 * 1024.0))
-                                        option.copy(desc = "${option.desc} · $sizeMb")
-                                    } else {
-                                        option
-                                    }
-                                }
+                                    val downloadOptions = listOf(
+                                        DlOption("2160p (4K)", "Ultra HD", "video", "bestvideo[height<=2160]+bestaudio/best", 2160),
+                                        DlOption("1440p (2K)", "Quad HD", "video", "bestvideo[height<=1440]+bestaudio/best", 1440),
+                                        DlOption("1080p", "Full HD", "video", "bestvideo[height<=1080]+bestaudio/best", 1080),
+                                        DlOption("720p", "High Definition", "video", "bestvideo[height<=720]+bestaudio/best", 720),
+                                        DlOption("480p", "Standard", "video", "bestvideo[height<=480]+bestaudio/best", 480),
+                                        DlOption("360p", "Low", "video", "bestvideo[height<=360]+bestaudio/best", 360),
+                                        DlOption("240p", "Sangat Rendah", "video", "bestvideo[height<=240]+bestaudio/best", 240),
+                                        DlOption("Audio", "MP3", "audio", "bestaudio/best", 0)
+                                    )
 
-                                finalOptions.forEachIndexed { index, option ->
-                                    Row(modifier = Modifier.fillMaxWidth().padding(top = 8.dp).clip(RoundedCornerShape(20.dp)).background(Color(0x80161B22)).border(1.dp, BorderColor, RoundedCornerShape(20.dp)).clickable { }.padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
-                                        Box(modifier = Modifier.size(36.dp).clip(CircleShape).background(if (option.kind == "audio") Color(0x33A020F0) else Color(0x2200E5FF)), contentAlignment = Alignment.Center) {
-                                            Icon(painterResource(if (option.kind == "audio") R.drawable.ic_audio else R.drawable.ic_video), contentDescription = null, tint = CyanWarm, modifier = Modifier.size(16.dp))
+                                    val filteredOptions = if (parsedQualities.isNotEmpty()) {
+                                        downloadOptions.filter { option ->
+                                            option.kind == "audio" ||
+                                            parsedQualities.containsKey("${option.height}p")
                                         }
-                                        Spacer(modifier = Modifier.width(12.dp))
-                                        Column(modifier = Modifier.weight(1f)) {
-                                            Text(option.label, color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
-                                            Text(option.desc, color = TextMuted, fontSize = 11.sp)
+                                    } else {
+                                        downloadOptions
+                                    }
+
+                                    val finalOptions = filteredOptions.map { option ->
+                                        val sizeBytes = when {
+                                            option.kind == "video" -> {
+                                                val vSize = parsedQualities["${option.height}p"] ?: 0L
+                                                val aSize = parsedQualities["audio"] ?: 0L
+                                                if (vSize > 0L) vSize + aSize else 0L
+                                            }
+                                            option.label == "Audio" -> {
+                                                parsedQualities["audio"] ?: 0L
+                                            }
+                                            else -> 0L
                                         }
-                                        Box(modifier = Modifier.size(36.dp).clip(CircleShape).background(GradientPrimary).clickable { 
-                                            startDownload(context, urlInput, option.formatId, finalTitle, isAudio = (option.kind == "audio"))
-                                        }, contentAlignment = Alignment.Center) {
-                                            Icon(painterResource(R.drawable.ic_download), contentDescription = null, tint = Color.Black, modifier = Modifier.size(16.dp))
+                                        
+                                        if (sizeBytes > 0L) {
+                                            val sizeMb = String.format("%.1f MB", sizeBytes / (1024.0 * 1024.0))
+                                            option.copy(desc = "${option.desc} · $sizeMb")
+                                        } else {
+                                            option
+                                        }
+                                    }
+
+                                    finalOptions.forEachIndexed { index, option ->
+                                        Row(modifier = Modifier.fillMaxWidth().padding(top = 8.dp).clip(RoundedCornerShape(20.dp)).background(Color(0x80161B22)).border(1.dp, BorderColor, RoundedCornerShape(20.dp)).clickable { }.padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
+                                            Box(modifier = Modifier.size(36.dp).clip(CircleShape).background(if (option.kind == "audio") Color(0x33A020F0) else Color(0x2200E5FF)), contentAlignment = Alignment.Center) {
+                                                Icon(painterResource(if (option.kind == "audio") R.drawable.ic_audio else R.drawable.ic_video), contentDescription = null, tint = CyanWarm, modifier = Modifier.size(16.dp))
+                                            }
+                                            Spacer(modifier = Modifier.width(12.dp))
+                                            Column(modifier = Modifier.weight(1f)) {
+                                                Text(option.label, color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+                                                Text(option.desc, color = TextMuted, fontSize = 11.sp)
+                                            }
+                                            Box(modifier = Modifier.size(36.dp).clip(CircleShape).background(GradientPrimary).clickable { 
+                                                startDownload(context, urlInput, option.formatId, finalTitle, isAudio = (option.kind == "audio"))
+                                            }, contentAlignment = Alignment.Center) {
+                                                Icon(painterResource(R.drawable.ic_download), contentDescription = null, tint = Color.Black, modifier = Modifier.size(16.dp))
+                                            }
                                         }
                                     }
                                 }

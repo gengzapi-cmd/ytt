@@ -15,7 +15,10 @@ data class ScrapedMetadata(
     val likeCount: Long,
     val extractor: String,
     val qualities: String = "",
-    val videoType: String = "reguler"
+    val videoType: String = "reguler",
+    val tiktokVideoUrl: String = "",
+    val tiktokAudioMusikUrl: String = "",
+    val tiktokSlides: List<String> = emptyList()
 )
 
 object MetadataScraper {
@@ -109,21 +112,188 @@ object MetadataScraper {
             ?: "Video TikTok"
         title = title.trim()
 
-        val uploader = extractMeta(html, "<meta property=\"og:description\" content=\"([^\"]+)\"")
+        var uploader = extractMeta(html, "<meta property=\"og:description\" content=\"([^\"]+)\"")
             ?.split(" ")?.firstOrNull { it.startsWith("@") }
             ?: "TikTok User"
 
-        val thumbnail = extractMeta(html, "<meta property=\"og:image\" content=\"([^\"]+)\"")
+        var thumbnail = extractMeta(html, "<meta property=\"og:image\" content=\"([^\"]+)\"")
             ?: ""
+
+        var videoUrl = ""
+        var audioMusikUrl = ""
+        var duration = 0
+        var viewCount = 0L
+        var likeCount = 0L
+        val slides = mutableListOf<String>()
+        var videoType = "Tiktok Video"
+
+        // 1. Try parsing __UNIVERSAL_DATA_FOR_REHYDRATION__
+        try {
+            val startTag = "<script id=\"__UNIVERSAL_DATA_FOR_REHYDRATION__\" type=\"application/json\">"
+            val endTag = "</script>"
+            val idx = html.indexOf(startTag)
+            if (idx != -1) {
+                val startJson = idx + startTag.length
+                val endJson = html.indexOf(endTag, startJson)
+                if (endJson != -1) {
+                    val jsonStr = html.substring(startJson, endJson).trim()
+                    val json = org.json.JSONObject(jsonStr)
+                    
+                    val defaultScope = json.optJSONObject("__DEFAULT_SCOPE__")
+                    val videoDetail = defaultScope?.optJSONObject("webapp.video-detail")
+                    val itemInfo = videoDetail?.optJSONObject("itemInfo")
+                    val itemStruct = itemInfo?.optJSONObject("itemStruct")
+                    
+                    if (itemStruct != null) {
+                        val desc = itemStruct.optString("desc")
+                        if (desc.isNotEmpty()) title = desc
+                        
+                        val authorObj = itemStruct.optJSONObject("author")
+                        if (authorObj != null) {
+                            val uniqueId = authorObj.optString("uniqueId")
+                            if (uniqueId.isNotEmpty()) uploader = "@$uniqueId"
+                        }
+
+                        val videoObj = itemStruct.optJSONObject("video")
+                        if (videoObj != null) {
+                            videoUrl = videoObj.optString("playAddr")
+                            if (videoUrl.isEmpty()) videoUrl = videoObj.optString("downloadAddr")
+                            duration = videoObj.optInt("duration")
+                            val cover = videoObj.optString("cover")
+                            if (cover.isNotEmpty()) thumbnail = cover
+                        }
+
+                        val statsObj = itemStruct.optJSONObject("stats")
+                        if (statsObj != null) {
+                            viewCount = statsObj.optLong("playCount")
+                            likeCount = statsObj.optLong("diggCount")
+                        }
+
+                        val musicObj = itemStruct.optJSONObject("music")
+                        if (musicObj != null) {
+                            audioMusikUrl = musicObj.optString("playUrl")
+                        }
+
+                        val imagePostInfoObj = itemStruct.optJSONObject("imagePostInfo")
+                        if (imagePostInfoObj != null) {
+                            val imagesArr = imagePostInfoObj.optJSONArray("images")
+                            if (imagesArr != null && imagesArr.length() > 0) {
+                                for (i in 0 until imagesArr.length()) {
+                                    val imgObj = imagesArr.optJSONObject(i)
+                                    val displayImage = imgObj?.optJSONObject("displayImage") ?: imgObj?.optJSONObject("display_image")
+                                    val urlList = displayImage?.optJSONArray("urlList") ?: displayImage?.optJSONArray("url_list")
+                                    if (urlList != null && urlList.length() > 0) {
+                                        val firstUrl = urlList.optString(0)
+                                        if (firstUrl.isNotEmpty()) slides.add(firstUrl)
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+
+        // 2. Try parsing SIGI_STATE as fallback
+        if (videoUrl.isEmpty() && slides.isEmpty()) {
+            try {
+                val startTag = "<script id=\"SIGI_STATE\" type=\"application/json\">"
+                val endTag = "</script>"
+                val idx = html.indexOf(startTag)
+                if (idx != -1) {
+                    val startJson = idx + startTag.length
+                    val endJson = html.indexOf(endTag, startJson)
+                    if (endJson != -1) {
+                        val jsonStr = html.substring(startJson, endJson).trim()
+                        val json = org.json.JSONObject(jsonStr)
+                        val itemModule = json.optJSONObject("ItemModule")
+                        if (itemModule != null) {
+                            val keys = itemModule.keys()
+                            if (keys.hasNext()) {
+                                val videoId = keys.next()
+                                val itemObj = itemModule.optJSONObject(videoId)
+                                if (itemObj != null) {
+                                    val desc = itemObj.optString("desc")
+                                    if (desc.isNotEmpty()) title = desc
+                                    
+                                    val authorName = itemObj.optString("author")
+                                    if (authorName.isNotEmpty()) uploader = "@$authorName"
+                                    
+                                    val videoObj = itemObj.optJSONObject("video")
+                                    if (videoObj != null) {
+                                        videoUrl = videoObj.optString("playAddr")
+                                        if (videoUrl.isEmpty()) videoUrl = videoObj.optString("downloadAddr")
+                                        duration = videoObj.optInt("duration")
+                                    }
+                                    
+                                    val statsObj = itemObj.optJSONObject("stats")
+                                    if (statsObj != null) {
+                                        viewCount = statsObj.optLong("playCount")
+                                        likeCount = statsObj.optLong("diggCount")
+                                    }
+                                    
+                                    val musicObj = itemObj.optJSONObject("music")
+                                    if (musicObj != null) {
+                                        audioMusikUrl = musicObj.optString("playUrl")
+                                    }
+                                    
+                                    val imagePostInfoObj = itemObj.optJSONObject("imagePostInfo")
+                                    if (imagePostInfoObj != null) {
+                                        val imagesArr = imagePostInfoObj.optJSONArray("images")
+                                        if (imagesArr != null && imagesArr.length() > 0) {
+                                            for (i in 0 until imagesArr.length()) {
+                                                val imgObj = imagesArr.optJSONObject(i)
+                                                val displayImage = imgObj?.optJSONObject("displayImage") ?: imgObj?.optJSONObject("display_image")
+                                                val urlList = displayImage?.optJSONArray("urlList") ?: displayImage?.optJSONArray("url_list")
+                                                if (urlList != null && urlList.length() > 0) {
+                                                    val firstUrl = urlList.optString(0)
+                                                    if (firstUrl.isNotEmpty()) slides.add(firstUrl)
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            } catch (e: Exception) {
+                e.printStackTrace()
+            }
+        }
+
+        // 3. General Regex Fallbacks
+        if (videoUrl.isEmpty()) {
+            videoUrl = extractMeta(html, "\"playAddr\":\"([^\"]+)\"") ?: ""
+            if (videoUrl.isNotEmpty()) {
+                videoUrl = videoUrl.replace("\\u002F", "/").replace("\\u0026", "&")
+            }
+        }
+        if (audioMusikUrl.isEmpty()) {
+            audioMusikUrl = extractMeta(html, "\"playUrl\":\"([^\"]+)\"") ?: ""
+            if (audioMusikUrl.isNotEmpty()) {
+                audioMusikUrl = audioMusikUrl.replace("\\u002F", "/").replace("\\u0026", "&")
+            }
+        }
+
+        if (slides.isNotEmpty()) {
+            videoType = "Tiktok Slide"
+        }
 
         return ScrapedMetadata(
             title = title,
             uploader = uploader,
             thumbnail = thumbnail,
-            duration = 0,
-            viewCount = 0L,
-            likeCount = 0L,
-            extractor = "tiktok"
+            duration = duration,
+            viewCount = viewCount,
+            likeCount = likeCount,
+            extractor = "tiktok",
+            videoType = videoType,
+            tiktokVideoUrl = videoUrl,
+            tiktokAudioMusikUrl = audioMusikUrl,
+            tiktokSlides = slides
         )
     }
 
