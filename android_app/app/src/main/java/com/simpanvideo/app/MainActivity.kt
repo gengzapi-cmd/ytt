@@ -199,6 +199,43 @@ data class ActiveDownload(
 
 object DownloadTracker {
     val activeDownloads = mutableStateListOf<ActiveDownload>()
+
+    fun add(active: ActiveDownload) {
+        android.os.Handler(android.os.Looper.getMainLooper()).post {
+            activeDownloads.removeIf { it.id == active.id }
+            activeDownloads.add(active)
+        }
+    }
+
+    fun updateProgress(id: String, progress: Int, speed: String, eta: String) {
+        android.os.Handler(android.os.Looper.getMainLooper()).post {
+            val index = activeDownloads.indexOfFirst { it.id == id }
+            if (index != -1) {
+                activeDownloads[index] = activeDownloads[index].copy(
+                    progress = progress,
+                    speed = speed,
+                    eta = eta
+                )
+            }
+        }
+    }
+
+    fun remove(id: String) {
+        android.os.Handler(android.os.Looper.getMainLooper()).post {
+            activeDownloads.removeIf { it.id == id }
+        }
+    }
+
+    fun togglePause(id: String) {
+        android.os.Handler(android.os.Looper.getMainLooper()).post {
+            val index = activeDownloads.indexOfFirst { it.id == id }
+            if (index != -1) {
+                activeDownloads[index] = activeDownloads[index].copy(
+                    isPaused = !activeDownloads[index].isPaused
+                )
+            }
+        }
+    }
 }
 
 data class CompletedDownload(
@@ -223,14 +260,24 @@ object CompletedDownloadDatabase {
     }
 
     fun add(context: Context, download: CompletedDownload) {
-        completedList.removeIf { it.id == download.id }
-        completedList.add(0, download)
-        saveToStorage(context, completedList)
+        android.os.Handler(android.os.Looper.getMainLooper()).post {
+            completedList.removeIf { it.id == download.id }
+            completedList.add(0, download)
+            val currentList = completedList.toList()
+            Thread {
+                saveToStorage(context, currentList)
+            }.start()
+        }
     }
 
     fun remove(context: Context, id: String) {
-        completedList.removeIf { it.id == id }
-        saveToStorage(context, completedList)
+        android.os.Handler(android.os.Looper.getMainLooper()).post {
+            completedList.removeIf { it.id == id }
+            val currentList = completedList.toList()
+            Thread {
+                saveToStorage(context, currentList)
+            }.start()
+        }
     }
 
     private fun loadFromStorage(context: Context): List<CompletedDownload> {
@@ -390,6 +437,23 @@ fun formatEta(seconds: Long): String {
     }
 }
 
+fun requestNotificationPermission(context: Context) {
+    if (Build.VERSION.SDK_INT >= 33) {
+        var currentContext = context
+        while (currentContext is android.content.ContextWrapper) {
+            if (currentContext is android.app.Activity) {
+                break
+            }
+            currentContext = currentContext.baseContext
+        }
+        if (currentContext is android.app.Activity) {
+            if (ContextCompat.checkSelfPermission(currentContext, android.Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
+                ActivityCompat.requestPermissions(currentContext, arrayOf(android.Manifest.permission.POST_NOTIFICATIONS), 101)
+            }
+        }
+    }
+}
+
 fun startDownload(
     context: Context, 
     videoUrl: String, 
@@ -401,6 +465,7 @@ fun startDownload(
     durationSeconds: Int = 0,
     platform: String = ""
 ) {
+    requestNotificationPermission(context)
     val downloadDir = android.os.Environment.getExternalStoragePublicDirectory(android.os.Environment.DIRECTORY_DOWNLOADS)
     val safeTitle = title.replace(Regex("[\\\\/:*?\"<>|]"), "_")
     val uniqueTitleBase = getUniqueTitle(downloadDir, safeTitle)
@@ -416,7 +481,7 @@ fun startDownload(
         eta = "Menghubungkan...",
         typeLabel = if (isAudio) "audio" else "video"
     )
-    DownloadTracker.activeDownloads.add(activeItem)
+    DownloadTracker.add(activeItem)
 
     CoroutineScope(Dispatchers.IO).launch {
         val notificationManager = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
@@ -513,14 +578,12 @@ fun startDownload(
                         else -> "Video"
                     }
 
-                    val index = DownloadTracker.activeDownloads.indexOfFirst { it.id == uniqueTitleBase }
-                    if (index != -1) {
-                        DownloadTracker.activeDownloads[index] = DownloadTracker.activeDownloads[index].copy(
-                            progress = currentProgress,
-                            speed = if (speed.isNotEmpty()) "$phasePrefix ($speed)" else phasePrefix,
-                            eta = eta
-                        )
-                    }
+                    DownloadTracker.updateProgress(
+                        uniqueTitleBase,
+                        currentProgress,
+                        if (speed.isNotEmpty()) "$phasePrefix ($speed)" else phasePrefix,
+                        eta
+                    )
 
                     val updateViews = RemoteViews(context.packageName, R.layout.custom_notification)
                     updateViews.setTextViewText(R.id.notification_title, displayTitle)
@@ -551,7 +614,7 @@ fun startDownload(
                 }
             }
 
-            DownloadTracker.activeDownloads.removeIf { it.id == uniqueTitleBase }
+            DownloadTracker.remove(uniqueTitleBase)
 
             val localThumbPath = downloadThumbnailLocally(context, uniqueTitleBase, thumbnailUrl)
 
@@ -603,7 +666,7 @@ fun startDownload(
             withContext(Dispatchers.Main) { Toast.makeText(context, "Selesai mengunduh $displayTitle", Toast.LENGTH_LONG).show() }
         } catch (e: Exception) {
             e.printStackTrace()
-            DownloadTracker.activeDownloads.removeIf { it.id == uniqueTitleBase }
+            DownloadTracker.remove(uniqueTitleBase)
 
             val errorViews = RemoteViews(context.packageName, R.layout.custom_notification)
             errorViews.setTextViewText(R.id.notification_title, displayTitle)
@@ -640,6 +703,7 @@ fun downloadDirectFile(
     platform: String = "",
     typeLabel: String = ""
 ) {
+    requestNotificationPermission(context)
     val downloadDir = android.os.Environment.getExternalStoragePublicDirectory(android.os.Environment.DIRECTORY_DOWNLOADS)
     val safeTitle = fileName.replace(Regex("[\\\\/:*?\"<>|]"), "_")
     val uniqueTitleBase = getUniqueTitle(downloadDir, safeTitle)
@@ -663,7 +727,7 @@ fun downloadDirectFile(
         eta = "Menghubungkan...",
         typeLabel = resolvedTypeLabel
     )
-    DownloadTracker.activeDownloads.add(activeItem)
+    DownloadTracker.add(activeItem)
 
     CoroutineScope(Dispatchers.IO).launch {
         val notificationManager = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
@@ -792,14 +856,7 @@ fun downloadDirectFile(
                             lastUpdateTime = now
                             lastBytesRead = totalBytesRead
 
-                            val index = DownloadTracker.activeDownloads.indexOfFirst { it.id == uniqueTitleBase }
-                            if (index != -1) {
-                                DownloadTracker.activeDownloads[index] = DownloadTracker.activeDownloads[index].copy(
-                                    progress = progress,
-                                    speed = speedText,
-                                    eta = etaText
-                                )
-                            }
+                            DownloadTracker.updateProgress(uniqueTitleBase, progress, speedText, etaText)
 
                             val updateViews = RemoteViews(context.packageName, R.layout.custom_notification)
                             updateViews.setTextViewText(R.id.notification_title, displayTitle)
@@ -828,7 +885,7 @@ fun downloadDirectFile(
                 outputStream.close()
                 inputStream.close()
 
-                DownloadTracker.activeDownloads.removeIf { it.id == uniqueTitleBase }
+                DownloadTracker.remove(uniqueTitleBase)
 
                 val localThumbPath = downloadThumbnailLocally(context, uniqueTitleBase, thumbnailUrl)
 
@@ -878,7 +935,7 @@ fun downloadDirectFile(
             }
         } catch (e: Exception) {
             e.printStackTrace()
-            DownloadTracker.activeDownloads.removeIf { it.id == uniqueTitleBase }
+            DownloadTracker.remove(uniqueTitleBase)
 
             val errorViews = RemoteViews(context.packageName, R.layout.custom_notification)
             errorViews.setTextViewText(R.id.notification_title, displayTitle)
@@ -1601,13 +1658,27 @@ fun DownloadsScreen() {
                 Box(modifier = Modifier.fillMaxWidth().padding(bottom = 12.dp).clip(RoundedCornerShape(24.dp)).background(SurfaceColor).border(1.dp, BorderColor, RoundedCornerShape(24.dp)).padding(14.dp)) {
                     Column {
                         Row(verticalAlignment = Alignment.CenterVertically) {
-                            Box(modifier = Modifier.size(48.dp).clip(CircleShape).background(Color(0x2200E5FF)), contentAlignment = Alignment.Center) {
-                                val iconRes = when (active.typeLabel) {
-                                    "audio" -> R.drawable.ic_audio
-                                    "gambar" -> R.drawable.ic_slide
-                                    else -> R.drawable.ic_video
+                            Box(
+                                modifier = Modifier
+                                    .size(48.dp)
+                                    .clip(CircleShape)
+                                    .background(Color(0x2200E5FF))
+                                    .clickable {
+                                        DownloadTracker.togglePause(active.id)
+                                    },
+                                contentAlignment = Alignment.Center
+                            ) {
+                                val iconRes = if (active.isPaused) {
+                                    R.drawable.ic_play
+                                } else {
+                                    R.drawable.ic_pause
                                 }
-                                Icon(painterResource(iconRes), contentDescription = null, tint = CyanWarm, modifier = Modifier.size(20.dp))
+                                Icon(
+                                    painter = painterResource(iconRes),
+                                    contentDescription = null,
+                                    tint = CyanWarm,
+                                    modifier = Modifier.size(20.dp)
+                                )
                             }
                             Spacer(modifier = Modifier.width(14.dp))
                             Column(modifier = Modifier.weight(1f)) {
