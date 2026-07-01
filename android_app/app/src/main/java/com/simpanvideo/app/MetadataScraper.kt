@@ -304,44 +304,40 @@ object MetadataScraper {
             connection = url.openConnection() as HttpURLConnection
             connection.requestMethod = "GET"
             connection.setRequestProperty("User-Agent", USER_AGENT)
+            connection.setRequestProperty("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8")
+            connection.setRequestProperty("Accept-Language", "en-US,en;q=0.9,id;q=0.8")
+            connection.setRequestProperty("Sec-Ch-Ua", "\"Not_A Brand\";v=\"8\", \"Chromium\";v=\"120\", \"Google Chrome\";v=\"120\"")
+            connection.setRequestProperty("Sec-Ch-Ua-Mobile", "?0")
+            connection.setRequestProperty("Sec-Ch-Ua-Platform", "\"Windows\"")
+            connection.setRequestProperty("Sec-Fetch-Dest", "document")
+            connection.setRequestProperty("Sec-Fetch-Mode", "navigate")
+            connection.setRequestProperty("Sec-Fetch-Site", "none")
+            connection.setRequestProperty("Sec-Fetch-User", "?1")
+            connection.setRequestProperty("Upgrade-Insecure-Requests", "1")
             if (urlString.contains("youtube.com") || urlString.contains("youtu.be")) {
                 connection.setRequestProperty("Referer", "https://www.youtube.com")
+            } else if (urlString.contains("tiktok.com")) {
+                connection.setRequestProperty("Referer", "https://www.tiktok.com/")
             }
-            connection.connectTimeout = 5000
-            connection.readTimeout = 5000
+            connection.connectTimeout = 10000
+            connection.readTimeout = 10000
             
             val responseCode = connection.responseCode
             if (responseCode == HttpURLConnection.HTTP_OK) {
                 val reader = BufferedReader(InputStreamReader(connection.inputStream))
                 val response = StringBuilder()
                 var line: String?
-                var linesRead = 0
                 while (reader.readLine().also { line = it } != null) {
                     response.append(line).append("\n")
-                    linesRead++
-                    
-                    val hasYtResponse = response.contains("ytInitialPlayerResponse = ") && response.contains("};")
-                    if (hasYtResponse) {
-                        break
-                    }
-                    
-                    if (!urlString.contains("youtube.com") && !urlString.contains("youtu.be")) {
-                        if (response.contains("</head>") || linesRead > 500) {
-                            break
-                        }
-                    }
-                    
-                    if (linesRead > 3000) {
-                        break
-                    }
                 }
                 reader.close()
                 response.toString()
             } else {
+                android.util.Log.e("SimpanVideoDebug", "HTTP error response code for $urlString: $responseCode")
                 null
             }
         } catch (e: Exception) {
-            e.printStackTrace()
+            android.util.Log.e("SimpanVideoDebug", "fetchHtml error for $urlString", e)
             null
         } finally {
             connection?.disconnect()
