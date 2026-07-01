@@ -104,6 +104,34 @@ object MetadataScraper {
         )
     }
 
+    private fun findJsonObjectRecursively(json: org.json.JSONObject, keyToFind: String): org.json.JSONObject? {
+        if (json.has(keyToFind)) {
+            val obj = json.optJSONObject(keyToFind)
+            if (obj != null) return obj
+        }
+        val keys = json.keys()
+        while (keys.hasNext()) {
+            val key = keys.next()
+            val innerObj = json.optJSONObject(key)
+            if (innerObj != null) {
+                val found = findJsonObjectRecursively(innerObj, keyToFind)
+                if (found != null) return found
+            } else {
+                val arr = json.optJSONArray(key)
+                if (arr != null) {
+                    for (i in 0 until arr.length()) {
+                        val arrObj = arr.optJSONObject(i)
+                        if (arrObj != null) {
+                            val found = findJsonObjectRecursively(arrObj, keyToFind)
+                            if (found != null) return found
+                        }
+                    }
+                }
+            }
+        }
+        return null
+    }
+
     fun fetchTikTokMetadata(urlString: String): ScrapedMetadata? {
         val html = fetchHtml(urlString) ?: return null
 
@@ -127,7 +155,9 @@ object MetadataScraper {
         val slides = mutableListOf<String>()
         var videoType = "Tiktok Video"
 
-        // 1. Try parsing __UNIVERSAL_DATA_FOR_REHYDRATION__
+        var jsonObject: org.json.JSONObject? = null
+
+        // 1. Try __UNIVERSAL_DATA_FOR_REHYDRATION__
         try {
             val startTag = "<script id=\"__UNIVERSAL_DATA_FOR_REHYDRATION__\" type=\"application/json\">"
             val endTag = "</script>"
@@ -137,67 +167,15 @@ object MetadataScraper {
                 val endJson = html.indexOf(endTag, startJson)
                 if (endJson != -1) {
                     val jsonStr = html.substring(startJson, endJson).trim()
-                    val json = org.json.JSONObject(jsonStr)
-                    
-                    val defaultScope = json.optJSONObject("__DEFAULT_SCOPE__")
-                    val videoDetail = defaultScope?.optJSONObject("webapp.video-detail")
-                    val itemInfo = videoDetail?.optJSONObject("itemInfo")
-                    val itemStruct = itemInfo?.optJSONObject("itemStruct")
-                    
-                    if (itemStruct != null) {
-                        val desc = itemStruct.optString("desc")
-                        if (desc.isNotEmpty()) title = desc
-                        
-                        val authorObj = itemStruct.optJSONObject("author")
-                        if (authorObj != null) {
-                            val uniqueId = authorObj.optString("uniqueId")
-                            if (uniqueId.isNotEmpty()) uploader = "@$uniqueId"
-                        }
-
-                        val videoObj = itemStruct.optJSONObject("video")
-                        if (videoObj != null) {
-                            videoUrl = videoObj.optString("playAddr")
-                            if (videoUrl.isEmpty()) videoUrl = videoObj.optString("downloadAddr")
-                            duration = videoObj.optInt("duration")
-                            val cover = videoObj.optString("cover")
-                            if (cover.isNotEmpty()) thumbnail = cover
-                        }
-
-                        val statsObj = itemStruct.optJSONObject("stats")
-                        if (statsObj != null) {
-                            viewCount = statsObj.optLong("playCount")
-                            likeCount = statsObj.optLong("diggCount")
-                        }
-
-                        val musicObj = itemStruct.optJSONObject("music")
-                        if (musicObj != null) {
-                            audioMusikUrl = musicObj.optString("playUrl")
-                        }
-
-                        val imagePostInfoObj = itemStruct.optJSONObject("imagePostInfo")
-                        if (imagePostInfoObj != null) {
-                            val imagesArr = imagePostInfoObj.optJSONArray("images")
-                            if (imagesArr != null && imagesArr.length() > 0) {
-                                for (i in 0 until imagesArr.length()) {
-                                    val imgObj = imagesArr.optJSONObject(i)
-                                    val displayImage = imgObj?.optJSONObject("displayImage") ?: imgObj?.optJSONObject("display_image")
-                                    val urlList = displayImage?.optJSONArray("urlList") ?: displayImage?.optJSONArray("url_list")
-                                    if (urlList != null && urlList.length() > 0) {
-                                        val firstUrl = urlList.optString(0)
-                                        if (firstUrl.isNotEmpty()) slides.add(firstUrl)
-                                    }
-                                }
-                            }
-                        }
-                    }
+                    jsonObject = org.json.JSONObject(jsonStr)
                 }
             }
         } catch (e: Exception) {
             e.printStackTrace()
         }
 
-        // 2. Try parsing SIGI_STATE as fallback
-        if (videoUrl.isEmpty() && slides.isEmpty()) {
+        // 2. Try SIGI_STATE as fallback
+        if (jsonObject == null) {
             try {
                 val startTag = "<script id=\"SIGI_STATE\" type=\"application/json\">"
                 val endTag = "</script>"
@@ -207,53 +185,81 @@ object MetadataScraper {
                     val endJson = html.indexOf(endTag, startJson)
                     if (endJson != -1) {
                         val jsonStr = html.substring(startJson, endJson).trim()
-                        val json = org.json.JSONObject(jsonStr)
-                        val itemModule = json.optJSONObject("ItemModule")
-                        if (itemModule != null) {
-                            val keys = itemModule.keys()
-                            if (keys.hasNext()) {
-                                val videoId = keys.next()
-                                val itemObj = itemModule.optJSONObject(videoId)
-                                if (itemObj != null) {
-                                    val desc = itemObj.optString("desc")
-                                    if (desc.isNotEmpty()) title = desc
-                                    
-                                    val authorName = itemObj.optString("author")
-                                    if (authorName.isNotEmpty()) uploader = "@$authorName"
-                                    
-                                    val videoObj = itemObj.optJSONObject("video")
-                                    if (videoObj != null) {
-                                        videoUrl = videoObj.optString("playAddr")
-                                        if (videoUrl.isEmpty()) videoUrl = videoObj.optString("downloadAddr")
-                                        duration = videoObj.optInt("duration")
-                                    }
-                                    
-                                    val statsObj = itemObj.optJSONObject("stats")
-                                    if (statsObj != null) {
-                                        viewCount = statsObj.optLong("playCount")
-                                        likeCount = statsObj.optLong("diggCount")
-                                    }
-                                    
-                                    val musicObj = itemObj.optJSONObject("music")
-                                    if (musicObj != null) {
-                                        audioMusikUrl = musicObj.optString("playUrl")
-                                    }
-                                    
-                                    val imagePostInfoObj = itemObj.optJSONObject("imagePostInfo")
-                                    if (imagePostInfoObj != null) {
-                                        val imagesArr = imagePostInfoObj.optJSONArray("images")
-                                        if (imagesArr != null && imagesArr.length() > 0) {
-                                            for (i in 0 until imagesArr.length()) {
-                                                val imgObj = imagesArr.optJSONObject(i)
-                                                val displayImage = imgObj?.optJSONObject("displayImage") ?: imgObj?.optJSONObject("display_image")
-                                                val urlList = displayImage?.optJSONArray("urlList") ?: displayImage?.optJSONArray("url_list")
-                                                if (urlList != null && urlList.length() > 0) {
-                                                    val firstUrl = urlList.optString(0)
-                                                    if (firstUrl.isNotEmpty()) slides.add(firstUrl)
-                                                }
-                                            }
-                                        }
-                                    }
+                        jsonObject = org.json.JSONObject(jsonStr)
+                    }
+                }
+            } catch (e: Exception) {
+                e.printStackTrace()
+            }
+        }
+
+        // 3. Parse fields from jsonObject using recursive helper
+        if (jsonObject != null) {
+            try {
+                val itemStruct = findJsonObjectRecursively(jsonObject, "itemStruct") 
+                    ?: findJsonObjectRecursively(jsonObject, "item_struct")
+                    ?: findJsonObjectRecursively(jsonObject, "ItemModule")?.let { itemModule ->
+                        // SIGI_STATE style item module
+                        val keys = itemModule.keys()
+                        if (keys.hasNext()) {
+                            itemModule.optJSONObject(keys.next())
+                        } else null
+                    }
+                    ?: findJsonObjectRecursively(jsonObject, "video")?.let { jsonObject }
+                
+                if (itemStruct != null) {
+                    val desc = itemStruct.optString("desc") ?: itemStruct.optString("title")
+                    if (!desc.isNullOrEmpty()) title = desc
+                    
+                    val authorObj = itemStruct.optJSONObject("author") ?: itemStruct.optJSONObject("author_info")
+                    if (authorObj != null) {
+                        val uniqueId = authorObj.optString("uniqueId") ?: authorObj.optString("unique_id") ?: authorObj.optString("nickname")
+                        if (uniqueId.isNotEmpty()) uploader = "@$uniqueId"
+                    } else {
+                        val authorName = itemStruct.optString("author")
+                        if (authorName.isNotEmpty()) uploader = "@$authorName"
+                    }
+
+                    val videoObj = itemStruct.optJSONObject("video") ?: findJsonObjectRecursively(itemStruct, "video")
+                    if (videoObj != null) {
+                        videoUrl = videoObj.optString("playAddr")
+                        if (videoUrl.isEmpty()) videoUrl = videoObj.optString("downloadAddr")
+                        if (videoUrl.isEmpty()) videoUrl = videoObj.optString("play_addr")
+                        if (videoUrl.isEmpty()) videoUrl = videoObj.optString("download_addr")
+                        duration = videoObj.optInt("duration")
+                        val cover = videoObj.optString("cover") ?: videoObj.optString("cover_addr")
+                        if (cover.isNotEmpty()) thumbnail = cover
+                    }
+
+                    val statsObj = itemStruct.optJSONObject("stats") ?: itemStruct.optJSONObject("statistics") ?: findJsonObjectRecursively(itemStruct, "stats")
+                    if (statsObj != null) {
+                        viewCount = statsObj.optLong("playCount") ?: statsObj.optLong("play_count") ?: statsObj.optLong("viewCount")
+                        likeCount = statsObj.optLong("diggCount") ?: statsObj.optLong("digg_count") ?: statsObj.optLong("likeCount")
+                    }
+
+                    val musicObj = itemStruct.optJSONObject("music") ?: itemStruct.optJSONObject("music_info") ?: findJsonObjectRecursively(itemStruct, "music")
+                    if (musicObj != null) {
+                        audioMusikUrl = musicObj.optString("playUrl") ?: musicObj.optString("play_url")
+                    }
+
+                    val imagePostInfoObj = itemStruct.optJSONObject("imagePostInfo") 
+                        ?: itemStruct.optJSONObject("image_post_info")
+                        ?: findJsonObjectRecursively(itemStruct, "imagePostInfo")
+                        ?: findJsonObjectRecursively(itemStruct, "image_post_info")
+                    if (imagePostInfoObj != null) {
+                        val imagesArr = imagePostInfoObj.optJSONArray("images") ?: imagePostInfoObj.optJSONArray("image_list")
+                        if (imagesArr != null && imagesArr.length() > 0) {
+                            for (i in 0 until imagesArr.length()) {
+                                val imgObj = imagesArr.optJSONObject(i)
+                                val displayImage = imgObj?.optJSONObject("displayImage") 
+                                    ?: imgObj?.optJSONObject("display_image")
+                                    ?: imgObj?.optJSONObject("imageURL")
+                                    ?: imgObj?.optJSONObject("image_url")
+                                    ?: imgObj
+                                val urlList = displayImage?.optJSONArray("urlList") ?: displayImage?.optJSONArray("url_list")
+                                if (urlList != null && urlList.length() > 0) {
+                                    val firstUrl = urlList.optString(0)
+                                    if (firstUrl.isNotEmpty()) slides.add(firstUrl)
                                 }
                             }
                         }
@@ -264,7 +270,7 @@ object MetadataScraper {
             }
         }
 
-        // 3. General Regex Fallbacks
+        // 4. General Regex Fallbacks
         if (videoUrl.isEmpty()) {
             videoUrl = extractMeta(html, "\"playAddr\":\"([^\"]+)\"") ?: ""
             if (videoUrl.isNotEmpty()) {
@@ -298,50 +304,78 @@ object MetadataScraper {
     }
 
     private fun fetchHtml(urlString: String): String? {
+        var currentUrl = urlString
         var connection: HttpURLConnection? = null
-        return try {
-            val url = URL(urlString)
-            connection = url.openConnection() as HttpURLConnection
-            connection.requestMethod = "GET"
-            connection.setRequestProperty("User-Agent", USER_AGENT)
-            connection.setRequestProperty("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8")
-            connection.setRequestProperty("Accept-Language", "en-US,en;q=0.9,id;q=0.8")
-            connection.setRequestProperty("Sec-Ch-Ua", "\"Not_A Brand\";v=\"8\", \"Chromium\";v=\"120\", \"Google Chrome\";v=\"120\"")
-            connection.setRequestProperty("Sec-Ch-Ua-Mobile", "?0")
-            connection.setRequestProperty("Sec-Ch-Ua-Platform", "\"Windows\"")
-            connection.setRequestProperty("Sec-Fetch-Dest", "document")
-            connection.setRequestProperty("Sec-Fetch-Mode", "navigate")
-            connection.setRequestProperty("Sec-Fetch-Site", "none")
-            connection.setRequestProperty("Sec-Fetch-User", "?1")
-            connection.setRequestProperty("Upgrade-Insecure-Requests", "1")
-            if (urlString.contains("youtube.com") || urlString.contains("youtu.be")) {
-                connection.setRequestProperty("Referer", "https://www.youtube.com")
-            } else if (urlString.contains("tiktok.com")) {
-                connection.setRequestProperty("Referer", "https://www.tiktok.com/")
-            }
-            connection.connectTimeout = 10000
-            connection.readTimeout = 10000
-            
-            val responseCode = connection.responseCode
-            if (responseCode == HttpURLConnection.HTTP_OK) {
-                val reader = BufferedReader(InputStreamReader(connection.inputStream))
-                val response = StringBuilder()
-                var line: String?
-                while (reader.readLine().also { line = it } != null) {
-                    response.append(line).append("\n")
+        var redirectsFollowed = 0
+        val maxRedirects = 5
+
+        while (redirectsFollowed < maxRedirects) {
+            try {
+                val url = URL(currentUrl)
+                connection = url.openConnection() as HttpURLConnection
+                connection.instanceFollowRedirects = false
+                connection.requestMethod = "GET"
+                connection.setRequestProperty("User-Agent", USER_AGENT)
+                connection.setRequestProperty("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8")
+                connection.setRequestProperty("Accept-Language", "en-US,en;q=0.9,id;q=0.8")
+                connection.setRequestProperty("Sec-Ch-Ua", "\"Not_A Brand\";v=\"8\", \"Chromium\";v=\"120\", \"Google Chrome\";v=\"120\"")
+                connection.setRequestProperty("Sec-Ch-Ua-Mobile", "?0")
+                connection.setRequestProperty("Sec-Ch-Ua-Platform", "\"Windows\"")
+                connection.setRequestProperty("Sec-Fetch-Dest", "document")
+                connection.setRequestProperty("Sec-Fetch-Mode", "navigate")
+                connection.setRequestProperty("Sec-Fetch-Site", "none")
+                connection.setRequestProperty("Sec-Fetch-User", "?1")
+                connection.setRequestProperty("Upgrade-Insecure-Requests", "1")
+                if (currentUrl.contains("youtube.com") || currentUrl.contains("youtu.be")) {
+                    connection.setRequestProperty("Referer", "https://www.youtube.com")
+                } else if (currentUrl.contains("tiktok.com")) {
+                    connection.setRequestProperty("Referer", "https://www.tiktok.com/")
                 }
-                reader.close()
-                response.toString()
-            } else {
-                android.util.Log.e("SimpanVideoDebug", "HTTP error response code for $urlString: $responseCode")
-                null
+                connection.connectTimeout = 10000
+                connection.readTimeout = 10000
+
+                val responseCode = connection.responseCode
+                if (responseCode == HttpURLConnection.HTTP_MOVED_TEMP || 
+                    responseCode == HttpURLConnection.HTTP_MOVED_PERM || 
+                    responseCode == 307 || responseCode == 308) {
+                    
+                    val newUrl = connection.getHeaderField("Location")
+                    if (newUrl != null && newUrl.isNotEmpty()) {
+                        // Handle relative redirects
+                        currentUrl = if (newUrl.startsWith("http")) {
+                            newUrl
+                        } else {
+                            val uri = java.net.URI(currentUrl)
+                            val portSuffix = if (uri.port != -1) ":${uri.port}" else ""
+                            "${uri.scheme}://${uri.host}$portSuffix$newUrl"
+                        }
+                        redirectsFollowed++
+                        connection.disconnect()
+                        continue
+                    }
+                }
+
+                if (responseCode == HttpURLConnection.HTTP_OK) {
+                    val reader = BufferedReader(InputStreamReader(connection.inputStream))
+                    val response = StringBuilder()
+                    var line: String?
+                    while (reader.readLine().also { line = it } != null) {
+                        response.append(line).append("\n")
+                    }
+                    reader.close()
+                    return response.toString()
+                } else {
+                    android.util.Log.e("SimpanVideoDebug", "HTTP error response code for $currentUrl: $responseCode")
+                    return null
+                }
+            } catch (e: Exception) {
+                android.util.Log.e("SimpanVideoDebug", "fetchHtml error for $currentUrl", e)
+                return null
+            } finally {
+                connection?.disconnect()
             }
-        } catch (e: Exception) {
-            android.util.Log.e("SimpanVideoDebug", "fetchHtml error for $urlString", e)
-            null
-        } finally {
-            connection?.disconnect()
         }
+        return null
     }
 
     private fun extractJsonString(jsonStr: String, key: String): String? {

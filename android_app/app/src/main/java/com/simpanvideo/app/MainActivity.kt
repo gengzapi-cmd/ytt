@@ -226,12 +226,23 @@ fun startDownload(context: Context, videoUrl: String, formatId: String, title: S
 
         try {
             val request = YoutubeDLRequest(videoUrl)
+            
+            // Set User-Agent and Referer to prevent 403 Forbidden errors from CDN hosts
+            request.addOption("--user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+            if (videoUrl.contains("youtube.com") || videoUrl.contains("youtu.be")) {
+                request.addOption("--referer", "https://www.youtube.com")
+            } else if (videoUrl.contains("tiktok.com") || videoUrl.contains("tiktokcdn") || videoUrl.contains("akamaized.net")) {
+                request.addOption("--referer", "https://www.tiktok.com/")
+            }
+
             if (isAudio) {
                 request.addOption("-f", "bestaudio/best")
                 request.addOption("--extract-audio")
                 request.addOption("--audio-format", "mp3")
             } else {
-                request.addOption("-f", formatId)
+                if (formatId != "best") {
+                    request.addOption("-f", formatId)
+                }
             }
             
             // Tanpa subfolder, langsung ke folder Downloads
@@ -305,7 +316,15 @@ fun downloadDirectFile(context: Context, fileUrl: String, fileName: String) {
     val uniqueTitleBase = getUniqueTitle(downloadDir, safeTitle)
     val displayTitle = uniqueTitleBase.replace("_", " ")
 
-    Toast.makeText(context, "Memulai unduhan gambar...", Toast.LENGTH_SHORT).show()
+    val isAudio = fileUrl.contains(".mp3", ignoreCase = true) || fileName.contains("audio", ignoreCase = true)
+    val isVideo = fileUrl.contains(".mp4", ignoreCase = true) || fileName.contains("video", ignoreCase = true)
+    val typeLabel = when {
+        isAudio -> "audio"
+        isVideo -> "video"
+        else -> "gambar"
+    }
+
+    Toast.makeText(context, "Memulai unduhan $typeLabel...", Toast.LENGTH_SHORT).show()
     CoroutineScope(Dispatchers.IO).launch {
         val notificationManager = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
         val channelId = "simpanvideo_downloads"
@@ -317,28 +336,61 @@ fun downloadDirectFile(context: Context, fileUrl: String, fileName: String) {
         val builder = NotificationCompat.Builder(context, channelId)
             .setSmallIcon(android.R.drawable.stat_sys_download)
             .setContentTitle(displayTitle)
-            .setContentText("Mengunduh gambar...")
+            .setContentText("Mengunduh $typeLabel...")
             .setPriority(NotificationCompat.PRIORITY_LOW)
             .setOngoing(true)
             .setProgress(100, 0, true)
 
         notificationManager.notify(notificationId, builder.build())
 
+        var connection: HttpURLConnection? = null
         try {
-            val url = URL(fileUrl)
-            val connection = url.openConnection() as HttpURLConnection
-            connection.requestMethod = "GET"
-            connection.connectTimeout = 10000
-            connection.readTimeout = 10000
-            connection.connect()
+            var currentUrl = fileUrl
+            var redirectsFollowed = 0
+            val maxRedirects = 5
+            var responseCode = -1
+            
+            while (redirectsFollowed < maxRedirects) {
+                val url = URL(currentUrl)
+                connection = url.openConnection() as HttpURLConnection
+                connection.instanceFollowRedirects = false
+                connection.requestMethod = "GET"
+                connection.setRequestProperty("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+                if (currentUrl.contains("tiktok.com") || currentUrl.contains("tiktokcdn") || currentUrl.contains("akamaized.net")) {
+                    connection.setRequestProperty("Referer", "https://www.tiktok.com/")
+                }
+                connection.connectTimeout = 15000
+                connection.readTimeout = 15000
+                
+                responseCode = connection.responseCode
+                if (responseCode == HttpURLConnection.HTTP_MOVED_TEMP || 
+                    responseCode == HttpURLConnection.HTTP_MOVED_PERM || 
+                    responseCode == 307 || responseCode == 308) {
+                    
+                    val newUrl = connection.getHeaderField("Location")
+                    if (newUrl != null && newUrl.isNotEmpty()) {
+                        currentUrl = newUrl
+                        redirectsFollowed++
+                        connection.disconnect()
+                        continue
+                    }
+                }
+                break
+            }
 
-            if (connection.responseCode == HttpURLConnection.HTTP_OK) {
+            if (responseCode == HttpURLConnection.HTTP_OK && connection != null) {
                 val inputStream = connection.inputStream
                 val contentType = connection.contentType
                 val ext = when {
                     contentType != null && contentType.contains("image/png") -> "png"
                     contentType != null && contentType.contains("image/webp") -> "webp"
-                    else -> "jpg"
+                    contentType != null && (contentType.contains("audio/mpeg") || contentType.contains("audio/mp3")) -> "mp3"
+                    contentType != null && contentType.contains("audio/") -> "mp3"
+                    contentType != null && contentType.contains("video/mp4") -> "mp4"
+                    contentType != null && contentType.contains("video/") -> "mp4"
+                    fileUrl.contains(".mp3", ignoreCase = true) -> "mp3"
+                    fileUrl.contains(".mp4", ignoreCase = true) -> "mp4"
+                    else -> if (isAudio) "mp3" else if (isVideo) "mp4" else "jpg"
                 }
                 val outputFile = File(downloadDir, "$uniqueTitleBase.$ext")
                 val outputStream = FileOutputStream(outputFile)
@@ -354,7 +406,7 @@ fun downloadDirectFile(context: Context, fileUrl: String, fileName: String) {
                     if (fileLength > 0) {
                         val progress = ((totalBytesRead * 100) / fileLength).toInt()
                         builder.setProgress(100, progress, false)
-                            .setContentText("Mengunduh gambar... $progress%")
+                            .setContentText("Mengunduh $typeLabel... $progress%")
                         notificationManager.notify(notificationId, builder.build())
                     }
                 }
@@ -374,18 +426,20 @@ fun downloadDirectFile(context: Context, fileUrl: String, fileName: String) {
                     Toast.makeText(context, "Selesai mengunduh $displayTitle", Toast.LENGTH_SHORT).show()
                 }
             } else {
-                throw Exception("HTTP error code: ${connection.responseCode}")
+                throw Exception("HTTP error code: $responseCode")
             }
         } catch (e: Exception) {
             e.printStackTrace()
-            builder.setContentText("Gagal: ${e.message}")
+            builder.setContentText("Gagal mengunduh: ${e.message}")
                 .setProgress(0, 0, false)
                 .setOngoing(false)
                 .setSmallIcon(android.R.drawable.stat_notify_error)
             notificationManager.notify(notificationId, builder.build())
             withContext(Dispatchers.Main) {
-                Toast.makeText(context, "Gagal mengunduh gambar: ${e.message}", Toast.LENGTH_LONG).show()
+                Toast.makeText(context, "Gagal mengunduh $displayTitle: ${e.message}", Toast.LENGTH_LONG).show()
             }
+        } finally {
+            connection?.disconnect()
         }
     }
 }
@@ -413,9 +467,45 @@ fun formatNumber(number: Long): String {
 
 fun mapToVideoInfo(scraped: ScrapedMetadata): VideoInfo {
     val info = VideoInfo()
+    
+    // Log all fields of VideoInfo to see if the names match
+    try {
+        val fieldsList = info.javaClass.declaredFields.map { "${it.name} (${it.type.name})" }.joinToString(", ")
+        android.util.Log.d("SimpanVideoDebug", "VideoInfo declared fields: $fieldsList")
+    } catch (e: Exception) {
+        android.util.Log.e("SimpanVideoDebug", "Failed to print fields", e)
+    }
+
     fun setPrivateField(obj: Any, fieldName: String, value: Any?) {
         try {
-            val field = obj.javaClass.getDeclaredField(fieldName)
+            var clazz: Class<*>? = obj.javaClass
+            var field: java.lang.reflect.Field? = null
+            while (clazz != null) {
+                try {
+                    field = clazz.getDeclaredField(fieldName)
+                    break
+                } catch (e: NoSuchFieldException) {
+                    clazz = clazz.superclass
+                }
+            }
+            if (field == null) {
+                val snakeCaseName = fieldName.replace(Regex("([A-Z])")) { "_" + it.value.lowercase() }
+                if (snakeCaseName != fieldName) {
+                    clazz = obj.javaClass
+                    while (clazz != null) {
+                        try {
+                            field = clazz.getDeclaredField(snakeCaseName)
+                            break
+                        } catch (e: NoSuchFieldException) {
+                            clazz = clazz.superclass
+                        }
+                    }
+                }
+            }
+            if (field == null) {
+                android.util.Log.w("SimpanVideoDebug", "Field '$fieldName' (and its snake_case fallback) not found in class hierarchy")
+                return
+            }
             field.isAccessible = true
             val fieldType = field.type
             when {
@@ -428,8 +518,9 @@ fun mapToVideoInfo(scraped: ScrapedMetadata): VideoInfo {
                 }
                 else -> field.set(obj, value)
             }
+            android.util.Log.d("SimpanVideoDebug", "Successfully set field '$fieldName' to '$value'")
         } catch (e: Exception) {
-            e.printStackTrace()
+            android.util.Log.e("SimpanVideoDebug", "Failed to set field '$fieldName'", e)
         }
     }
     
@@ -439,7 +530,6 @@ fun mapToVideoInfo(scraped: ScrapedMetadata): VideoInfo {
     setPrivateField(info, "duration", scraped.duration)
     setPrivateField(info, "viewCount", scraped.viewCount)
     setPrivateField(info, "likeCount", scraped.likeCount)
-    setPrivateField(info, "extractor", scraped.extractor)
     return info
 }
 
@@ -659,7 +749,7 @@ fun HomeScreen() {
 
         if (mediaInfo != null) {
             val info = mediaInfo!!
-            val isTikTok = info.extractor?.contains("tiktok", ignoreCase = true) == true
+            val isTikTok = videoType.startsWith("Tiktok", ignoreCase = true)
             
             // Logika Hapus Tagar untuk YouTube
             val finalTitle = if (isTikTok) {
@@ -787,7 +877,7 @@ fun HomeScreen() {
                                                     Text("mp3", color = TextMuted, fontSize = 11.sp)
                                                 }
                                                 Box(modifier = Modifier.size(36.dp).clip(CircleShape).background(GradientPrimary).clickable { 
-                                                    startDownload(context, tiktokAudioMusikUrl, "best", "$finalTitle - Audio Musik", isAudio = false)
+                                                    downloadDirectFile(context, tiktokAudioMusikUrl, "$finalTitle - Audio Musik")
                                                 }, contentAlignment = Alignment.Center) {
                                                     Icon(painterResource(R.drawable.ic_download), contentDescription = null, tint = Color.Black, modifier = Modifier.size(16.dp))
                                                 }
@@ -807,7 +897,7 @@ fun HomeScreen() {
                                                     Text("Kualitas Standar", color = TextMuted, fontSize = 11.sp)
                                                 }
                                                 Box(modifier = Modifier.size(36.dp).clip(CircleShape).background(GradientPrimary).clickable { 
-                                                    startDownload(context, tiktokVideoUrl, "best", finalTitle, isAudio = false)
+                                                    downloadDirectFile(context, tiktokVideoUrl, finalTitle)
                                                 }, contentAlignment = Alignment.Center) {
                                                     Icon(painterResource(R.drawable.ic_download), contentDescription = null, tint = Color.Black, modifier = Modifier.size(16.dp))
                                                 }
@@ -843,7 +933,7 @@ fun HomeScreen() {
                                                     Text("mp3", color = TextMuted, fontSize = 11.sp)
                                                 }
                                                 Box(modifier = Modifier.size(36.dp).clip(CircleShape).background(GradientPrimary).clickable { 
-                                                    startDownload(context, tiktokAudioMusikUrl, "best", "$finalTitle - Audio Musik", isAudio = false)
+                                                    downloadDirectFile(context, tiktokAudioMusikUrl, "$finalTitle - Audio Musik")
                                                 }, contentAlignment = Alignment.Center) {
                                                     Icon(painterResource(R.drawable.ic_download), contentDescription = null, tint = Color.Black, modifier = Modifier.size(16.dp))
                                                 }
