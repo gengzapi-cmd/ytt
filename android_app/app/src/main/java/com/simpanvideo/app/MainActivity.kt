@@ -290,9 +290,16 @@ fun startDownload(context: Context, videoUrl: String, formatId: String, title: S
 }
 
 fun formatDuration(durationSeconds: Int): String {
-    val minutes = durationSeconds / 60
-    val seconds = durationSeconds % 60
-    return String.format("%02d:%02d", minutes, seconds)
+    if (durationSeconds >= 3600) {
+        val hours = durationSeconds / 3600
+        val minutes = (durationSeconds % 3600) / 60
+        val seconds = durationSeconds % 60
+        return String.format("%02d:%02d:%02d", hours, minutes, seconds)
+    } else {
+        val minutes = durationSeconds / 60
+        val seconds = durationSeconds % 60
+        return String.format("%02d:%02d", minutes, seconds)
+    }
 }
 
 fun formatNumber(number: Long): String {
@@ -363,6 +370,7 @@ fun HomeScreen() {
     var openOptions by remember { mutableStateOf(false) }
     var errorMessage by remember { mutableStateOf<String?>(null) }
     var parsedQualities by remember { mutableStateOf<Map<String, Long>>(emptyMap()) }
+    var videoType by remember { mutableStateOf("reguler") }
     
     val coroutineScope = rememberCoroutineScope()
     val clipboardManager = LocalClipboardManager.current
@@ -373,11 +381,13 @@ fun HomeScreen() {
         errorMessage = null
         mediaInfo = null
         parsedQualities = emptyMap()
+        videoType = "reguler"
         openOptions = false
         
         coroutineScope.launch {
             try {
                 var tempQualities = emptyMap<String, Long>()
+                var tempType = "reguler"
                 val info = withContext(Dispatchers.IO) {
                     val isYoutube = urlInput.contains("youtube.com", ignoreCase = true) || urlInput.contains("youtu.be", ignoreCase = true)
                     val isTikTok = urlInput.contains("tiktok.com", ignoreCase = true)
@@ -389,6 +399,7 @@ fun HomeScreen() {
                             val scraped = MetadataScraper.fetchYoutubeMetadata(urlInput)
                             if (scraped != null) {
                                 tempQualities = parseQualitiesString(scraped.qualities)
+                                tempType = scraped.videoType
                                 result = mapToVideoInfo(scraped)
                             }
                         } catch (e: Exception) {
@@ -426,6 +437,7 @@ fun HomeScreen() {
                     result!!
                 }
                 parsedQualities = tempQualities
+                videoType = tempType
                 mediaInfo = info
             } catch (e: Exception) {
                 e.printStackTrace()
@@ -565,7 +577,18 @@ fun HomeScreen() {
                         Row(modifier = Modifier.align(Alignment.TopStart).padding(12.dp).clip(RoundedCornerShape(12.dp)).background(Color(0x80000000)).padding(horizontal = 8.dp, vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
                             Icon(painterResource(if (isTikTok) R.drawable.ic_tiktok_mini else R.drawable.ic_youtube), contentDescription = null, tint = Color.White, modifier = Modifier.size(14.dp))
                             Spacer(modifier = Modifier.width(6.dp))
-                            Text(if (isTikTok) "TikTok" else "YouTube", color = Color.White, fontSize = 10.sp, fontWeight = FontWeight.SemiBold)
+                            Text(
+                                text = if (isTikTok) "TikTok" else {
+                                    when (videoType) {
+                                        "short" -> "YouTube Short"
+                                        "live" -> "YouTube Live"
+                                        else -> "YouTube"
+                                    }
+                                },
+                                color = Color.White,
+                                fontSize = 10.sp,
+                                fontWeight = FontWeight.SemiBold
+                            )
                         }
                         Box(modifier = Modifier.align(Alignment.TopEnd).padding(12.dp).clip(RoundedCornerShape(12.dp)).background(Color(0x80000000)).padding(horizontal = 8.dp, vertical = 4.dp)) {
                             Text(durationStr, color = Color.White, fontSize = 10.sp, fontWeight = FontWeight.SemiBold)
@@ -609,7 +632,7 @@ fun HomeScreen() {
                                     DlOption("480p", "Standard", "video", "bestvideo[height<=480]+bestaudio/best", 480),
                                     DlOption("360p", "Low", "video", "bestvideo[height<=360]+bestaudio/best", 360),
                                     DlOption("240p", "Sangat Rendah", "video", "bestvideo[height<=240]+bestaudio/best", 240),
-                                    DlOption("Audio Terbaik", "Kualitas Tertinggi", "audio", "bestaudio/best", 0)
+                                    DlOption("Audio", "MP3", "audio", "bestaudio/best", 0)
                                 )
 
                                 val filteredOptions = if (parsedQualities.isNotEmpty()) {
@@ -628,7 +651,7 @@ fun HomeScreen() {
                                             val aSize = parsedQualities["audio"] ?: 0L
                                             if (vSize > 0L) vSize + aSize else 0L
                                         }
-                                        option.label == "Audio Terbaik" -> {
+                                        option.label == "Audio" -> {
                                             parsedQualities["audio"] ?: 0L
                                         }
                                         else -> 0L
@@ -651,12 +674,6 @@ fun HomeScreen() {
                                         Column(modifier = Modifier.weight(1f)) {
                                             Text(option.label, color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
                                             Text(option.desc, color = TextMuted, fontSize = 11.sp)
-                                        }
-                                        if (index == 0) {
-                                            Box(modifier = Modifier.clip(RoundedCornerShape(8.dp)).background(Color(0x3300E5FF)).padding(horizontal = 8.dp, vertical = 4.dp)) {
-                                                Text("REKOMENDASI", color = CyanWarm, fontSize = 9.sp, fontWeight = FontWeight.Bold)
-                                            }
-                                            Spacer(modifier = Modifier.width(10.dp))
                                         }
                                         Box(modifier = Modifier.size(36.dp).clip(CircleShape).background(GradientPrimary).clickable { 
                                             startDownload(context, urlInput, option.formatId, finalTitle, isAudio = (option.kind == "audio"))

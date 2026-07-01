@@ -14,7 +14,8 @@ data class ScrapedMetadata(
     val viewCount: Long,
     val likeCount: Long,
     val extractor: String,
-    val qualities: String = ""
+    val qualities: String = "",
+    val videoType: String = "reguler"
 )
 
 object MetadataScraper {
@@ -79,6 +80,14 @@ object MetadataScraper {
 
         val thumbnail = "https://i.ytimg.com/vi/$videoId/hqdefault.jpg"
 
+        val isLive = html.contains("\"isLive\":true") || html.contains("\"isLiveContent\":true") || urlString.contains("/live/", ignoreCase = true)
+        val isShort = urlString.contains("/shorts/", ignoreCase = true)
+        val videoType = when {
+            isLive -> "live"
+            isShort -> "short"
+            else -> "reguler"
+        }
+
         return ScrapedMetadata(
             title = title,
             uploader = uploader,
@@ -87,7 +96,8 @@ object MetadataScraper {
             viewCount = viewCount,
             likeCount = likeCount,
             extractor = "youtube",
-            qualities = qualities
+            qualities = qualities,
+            videoType = videoType
         )
     }
 
@@ -259,7 +269,8 @@ object MetadataScraper {
             "youtu\\.be/([^&#\n\r?]+)",
             "youtube\\.com/embed/([^&#\n\r?]+)",
             "youtube\\.com/v/([^&#\n\r?]+)",
-            "youtube\\.com/shorts/([^&#\n\r?]+)"
+            "youtube\\.com/shorts/([^&#\n\r?]+)",
+            "youtube\\.com/live/([^&#\n\r?]+)"
         )
         for (p in patterns) {
             val pattern = Pattern.compile(p, Pattern.CASE_INSENSITIVE)
@@ -309,9 +320,11 @@ object MetadataScraper {
                 }
                 
                 if (ql != null && cl != null) {
-                    val existing = map[ql]
+                    val pIdx = ql.indexOf('p')
+                    val cleanQl = if (pIdx != -1) ql.substring(0, pIdx + 1) else ql
+                    val existing = map[cleanQl]
                     if (existing == null || mime.contains("video/mp4")) {
-                        map[ql] = cl
+                        map[cleanQl] = cl
                     }
                 } else if (cl != null && mime.contains("audio/")) {
                     val existingAudio = map["audio"]
